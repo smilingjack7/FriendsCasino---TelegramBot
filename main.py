@@ -943,55 +943,99 @@ async def roulette_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"/roulette command in chat {chat.id} ({chat.title}) by user {user.id}")
 
+    # Check if a game is already running in this chat
     if context.chat_data.get(ROULETTE_GAME_KEY):
         existing_game = context.chat_data[ROULETTE_GAME_KEY]
         msg_id = existing_game.get('message_id')
-        reply_text = "Игра в рулетку уже идет в этом чате!"
-        reply_args = {'allow_sending_without_reply': True} # Send even if original msg gone
-        if msg_id:
-            reply_text = f"Игра в рулетку уже идет! Присоединяйтесь к ставкам 👇"
-            reply_args['reply_to_message_id'] = msg_id
-        try:
-            await update.message.reply_text(reply_text, **reply_args)
-        except Exception as e:
-             logger.warning(f"Failed to reply to existing roulette game msg {msg_id} in chat {chat.id}: {e}")
-             await update.message.reply_text("Игра в рулетку уже идет!") # Fallback reply
-        return
+        logger.info(f"Roulette game already exists in chat {chat.id}. State: {existing_game.get('state')}, Msg ID: {msg_id}")
 
+        reply_text = "Игра в рулетку уже идет!" # Default message
+        reply_args = {} # Start with empty args
+
+        if msg_id:
+            # Prepare reply parameters IF message ID exists
+            from telegram import ReplyParameters # Import if not already imported globally
+            # We want to reply TO the message, so allow_sending_without_reply should be False (default)
+            reply_params = ReplyParameters(message_id=msg_id, chat_id=chat.id)
+            reply_args['reply_parameters'] = reply_params
+            reply_text = f"Игра в рулетку уже идет! Присоединяйтесь к ставкам 👇"
+
+        try:
+            # Attempt to reply (either to message or just in chat)
+            await update.message.reply_text(reply_text, **reply_args)
+
+        except BadRequest as e:
+            # Handle case where the message we are trying to reply to doesn't exist
+            if "replied message not found" in str(e).lower() or "message to reply not found" in str(e).lower():
+                logger.warning(f"Previous roulette message {msg_id} not found in chat {chat.id}. Cleaning up stale game data.")
+                await update.message.reply_text("Предыдущая игра завершена или ее сообщение удалено. Используйте /roulette еще раз, чтобы начать новую.")
+                # Force cleanup of the stale game data immediately
+                await cleanup_roulette_game(context, chat.id, delay=None) # No delay
+            else:
+                # Log other BadRequest errors but still inform the user generically
+                logger.warning(f"Failed to reply to existing roulette game message {msg_id} in chat {chat.id}: {e}")
+                await update.message.reply_text("Игра в рулетку уже идет!") # Generic fallback reply
+        except Exception as e: # Catch other potential errors during reply
+             logger.error(f"Unexpected error replying to existing roulette game in chat {chat.id}: {e}", exc_info=True)
+             await update.message.reply_text("Игра в рулетку уже идет!") # Generic fallback reply
+
+
+        # Important: Prevent starting a new game if one exists (or existed until cleanup)
+        return
+    # --- End of check for existing game ---
+
+
+    # --- Start New Game (only if no game was found above) ---
     start_time = time.time()
     timer_job_name = f'roulette_timer_{chat.id}_{int(start_time)}'
     game_state = {
-        'state': 'betting', 'message_id': None, 'chat_id': chat.id, 'start_time': start_time,
-        'timer_job_name': timer_job_name, 'bets': defaultdict(list),
-        'current_selection': defaultdict(lambda: {'amount': None, 'type': None, 'value': None}),
-        'winning_number': None, 'results': {},
+        'state': 'betting',
+        'message_id': None, # Will be set after sending message
+        'chat_id': chat.id,
+        'start_time': start_time,
+        'timer_job_name': timer_job_name,
+        'bets': defaultdict(list), # Bets per user_id
+        'current_selection': defaultdict(lambda: {'amount': None, 'type': None, 'value': None}), # Track selections
+        'winning_number': None,
+        'results': {},
     }
     context.chat_data[ROULETTE_GAME_KEY] = game_state
 
+    # Schedule the end of betting
     job = context.job_queue.run_once(
-        end_betting_phase, ROULETTE_TIMER_SECONDS,
-        data={'chat_id': chat.id, 'start_time': start_time, 'timer_job_name': timer_job_name},
+        end_betting_phase,
+        when=ROULETTE_TIMER_SECONDS,
+        data={'chat_id': chat.id, 'start_time': start_time, 'timer_job_name': timer_job_name}, # Pass data to identify the correct game
         name=timer_job_name
     )
     if not job:
         logger.error(f"Failed to schedule roulette timer job for chat {chat.id}")
         await update.message.reply_text("❌ Ошибка запуска таймера игры.")
-        context.chat_data.pop(ROULETTE_GAME_KEY, None)
+        context.chat_data.pop(ROULETTE_GAME_KEY, None) # Clean up failed game
         return
 
-    logger.info(f"Roulette game started chat {chat.id}. Timer job: {timer_job_name}")
+    logger.info(f"Roulette game started in chat {chat.id}. Timer job: {timer_job_name}")
 
+    # Send initial game message (will be updated later)
     try:
-        initial_message = await update.message.reply_text("⏳ Подготовка стола рулетки...", parse_mode=ParseMode.HTML)
+        initial_message = await update.message.reply_text(
+            text="⏳ Подготовка стола рулетки...",
+            parse_mode=ParseMode.HTML
+        )
         game_state['message_id'] = initial_message.message_id
+        # Now update the message with the actual game UI
         await update_roulette_message(context, chat.id)
     except Exception as e:
-        logger.error(f"Failed send/update initial roulette msg chat {chat.id}: {e}", exc_info=True)
+        logger.error(f"Failed to send/update initial roulette message in chat {chat.id}: {e}", exc_info=True)
+        # Attempt to remove the scheduled job if setup failed
         running_jobs = context.job_queue.get_jobs_by_name(timer_job_name)
-        for j in running_jobs: j.schedule_removal()
+        for j in running_jobs:
+            try:
+                j.schedule_removal()
+            except Exception as job_e:
+                 logger.warning(f"Failed to remove job {timer_job_name}: {job_e}")
         context.chat_data.pop(ROULETTE_GAME_KEY, None)
         await update.message.reply_text("❌ Ошибка при создании сообщения игры.")
-
 
 async def update_roulette_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, custom_text: str | None = None):
     game_data = context.chat_data.get(ROULETTE_GAME_KEY)
