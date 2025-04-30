@@ -109,8 +109,23 @@ async def blackjack_start_command(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             logger.debug(f"Failed to delete old BJ message {previous_message_id}: {e}")
 
-    # Clear previous game state from user_data
-    context.application.user_data.setdefault(user.id, {}).pop(BJ_GAME_KEY, None)
+        # --- Очистка предыдущего состояния игры ---
+    # 1. Получаем или создаем словарь данных для КОНКРЕТНОГО пользователя
+    user_specific_data = context.application.user_data.setdefault(user.id, {})
+
+    # 2. Теперь user_specific_data - это ТОЧНО словарь (или был создан как {}).
+    #    Выполняем pop на этом словаре.
+    #    Добавим проверку типа на всякий случай, хотя setdefault должен вернуть dict.
+    if isinstance(user_specific_data, dict):
+        user_specific_data.pop(BJ_GAME_KEY, None)
+        logger.debug(f"Cleared previous blackjack state for user {user.id}")
+    else:
+        # Эта ситуация маловероятна, но логируем на всякий случай
+        logger.warning(f"user_data for {user.id} is not a dict after setdefault: {type(user_specific_data)}. Cannot clear previous game state.")
+    # --- Конец очистки ---
+
+    # Дальше идет проверка баланса и остальная логика...
+    balance = await get_balance(user.id) # Используем await для асинхронной функции
 
     balance = await get_balance(user.id) # Use await for async function
     if balance is None:
