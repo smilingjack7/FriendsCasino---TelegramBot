@@ -819,10 +819,8 @@ async def blackjack_determine_outcome(context: ContextTypes.DEFAULT_TYPE, chat_i
         logger.error(f"BJ outcome u {user_id}: No message_id found.")
         return # Cannot update status without message ID
 
-    # Prevent double processing if outcome already determined somehow
     if game.get('state') == 'game_over' and game.get('outcome_determined'):
         logger.info(f"BJ outcome u {user_id}: Already determined.")
-        # Ensure final state is shown
         await blackjack_show_state(context, chat_id, user_id, game_state=game, edit_existing=True)
         return
 
@@ -831,8 +829,8 @@ async def blackjack_determine_outcome(context: ContextTypes.DEFAULT_TYPE, chat_i
     dv = get_hand_value(dh)
     db = dv > 21 # Dealer busted
     outcome_lines = []
-    total_winnings = 0 # Tracks net change relative to initial bets placed
-    total_bet = 0 # Sum of all initial bets
+    total_winnings = 0
+    total_bet = 0
 
     for i, hd in enumerate(phs):
         if not isinstance(hd, dict): continue
@@ -841,10 +839,10 @@ async def blackjack_determine_outcome(context: ContextTypes.DEFAULT_TYPE, chat_i
         b = hd.get('bet', 0)
         st = hd.get('status')
         pv = get_hand_value(h)
-        p_bj = (st == 'blackjack') # Player had Blackjack (from initial deal)
+        p_bj = (st == 'blackjack')
         total_bet += b
 
-        payout_multiplier = 0 # 0=lose, 1=push, 2=win, 1+BLACKJACK_PAYOUT=blackjack win
+        payout_multiplier = 0
         outcome_str = ""
         prefix = f"Рука {i+1}: " if len(phs) > 1 else ""
 
@@ -858,51 +856,51 @@ async def blackjack_determine_outcome(context: ContextTypes.DEFAULT_TYPE, chat_i
             else:
                 win_amount = b * BLACKJACK_PAYOUT
                 outcome_str = f"{prefix}Блекджек! Выигрыш +{win_amount:.2f} F."
-                payout_multiplier = 1 + BLACKJACK_PAYOUT # Bet returned + BJ payout
+                payout_multiplier = 1 + BLACKJACK_PAYOUT
         elif d_had_bj:
             outcome_str = f"{prefix}У дилера Блекджек. Ставка проиграна (-{b} F)."
             payout_multiplier = 0
         elif db:
             outcome_str = f"{prefix}У дилера перебор ({dv})! Выигрыш +{b} F."
-            payout_multiplier = 2 # Bet returned + winnings
+            payout_multiplier = 2
         elif pv > dv:
+            # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
             outcome_str = f"{prefix}Вы выиграли ({pv} > {dv}). Выигрыш +{b} F."
             payout_multiplier = 2
         elif pv == dv:
             outcome_str = f"{prefix}Ничья ({pv} = {dv}). Ставка возвращена."
             payout_multiplier = 1 # Push
         else: # pv < dv
+            # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
             outcome_str = f"{prefix}Вы проиграли ({pv} < {dv}). Ставка проиграна (-{b} F)."
             payout_multiplier = 0
 
         outcome_lines.append(outcome_str)
-        total_winnings += b * payout_multiplier # Accumulate total return (including original bets for wins/pushes)
+        total_winnings += b * payout_multiplier
 
-    net_change = total_winnings - total_bet # Calculate net profit/loss for the round
+    net_change = total_winnings - total_bet
 
-    # Update balance only if there's a positive return
-    # Note: Bets were already deducted at the start or during double/split
     if total_winnings > 0:
+        current_balance_before_update = get_balance(user_id) # Get balance before potential update
         if update_balance(user_id, total_winnings) is None:
             outcome_lines.append("\n<b>ОШИБКА НАЧИСЛЕНИЯ ВЫИГРЫША!</b>")
-            net_change = -total_bet # If update fails, player effectively lost all bets
-            logger.error(f"BJ outcome u {user_id}: Failed to update balance with winnings {total_winnings}")
+            # If update fails, the net change IS the loss of the bets placed earlier
+            # We don't need to adjust net_change here as it was already calculated based on bets.
+            # The total_winnings just weren't added back.
+            logger.error(f"BJ outcome u {user_id}: Failed to update balance with winnings {total_winnings}. Initial bet was {total_bet}. Balance before attempt: {current_balance_before_update}")
         else:
-             logger.info(f"BJ outcome u {user_id}: Balance updated by {total_winnings:.2f}. Net change: {net_change:+.2f}")
+             logger.info(f"BJ outcome u {user_id}: Balance updated by adding {total_winnings:.2f}. Net change for round: {net_change:+.2f}")
 
-    # Finalize game state
     game['state'] = 'game_over'
-    game['outcome_text'] = "\n".join(outcome_lines) + f"\n\n<b>Общий итог раунда: {net_change:+.2f} F</b>"
-    game['outcome_determined'] = True # Mark as determined
+    # It's safer to escape the final net_change string too, just in case
+    final_summary = f"\n\n<b>Общий итог раунда: {html_escape(f'{net_change:+.2f}')} F</b>"
+    game['outcome_text'] = "\n".join(outcome_lines) + final_summary
+    game['outcome_determined'] = True
 
-    # Show the final game state with results
     await blackjack_show_state(context, chat_id, user_id, game_state=game, edit_existing=True)
 
-    # Clean up game data from user_data after showing results
     context.application.user_data.get(user_id, {}).pop(BJ_GAME_KEY, None)
     logger.info(f"BJ game state cleaned for user {user_id}")
-
-
 # --- General Handlers ---
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q=update.callback_query
