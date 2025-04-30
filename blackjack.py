@@ -99,9 +99,9 @@ async def blackjack_start_command(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             logger.warning(f"Failed to answer callback query in blackjack_start_command: {e}")
 
-    # Use context.application.user_data for broader scope access if needed
-    user_game = context.application.user_data.get(user.id, {}).get(BJ_GAME_KEY, {})
-    previous_message_id = user_game.get('message_id')
+    # Удаляем старое сообщение игры, если оно есть
+    user_game_state_before_clear = context.application.user_data.get(user.id, {}).get(BJ_GAME_KEY, {})
+    previous_message_id = user_game_state_before_clear.get('message_id')
     if previous_message_id and previous_message_id != callback_message_id:
         try:
             await context.bot.delete_message(effective_chat_id, previous_message_id)
@@ -109,63 +109,98 @@ async def blackjack_start_command(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             logger.debug(f"Failed to delete old BJ message {previous_message_id}: {e}")
 
-        # --- Очистка предыдущего состояния игры ---
-    # 1. Получаем или создаем словарь данных для КОНКРЕТНОГО пользователя
-    user_specific_data = context.application.user_data.setdefault(user.id, {})
+    # --- Очистка предыдущего состояния игры (САМЫЙ ПРЯМОЙ ПОДХОД) ---
+    try:
+        # Пытаемся получить существующий словарь данных для пользователя
+        if user.id in context.application.user_data:
+            user_specific_data = context.application.user_data[user.id]
+            # Проверяем, что это действительно словарь
+            if isinstance(user_specific_data, dict):
+                # Если это словарь, удаляем ключ игры
+                user_specific_data.pop(BJ_GAME_KEY, None)
+                logger.debug(f"Cleared previous blackjack state for user {user.id}")
+            else:
+                # Если по ключу user.id лежит не словарь, это странно.
+                # Заменяем его пустым словарем.
+                logger.warning(f"Data for user {user.id} was not a dict ({type(user_specific_data)}). Re-initializing.")
+                context.application.user_data[user.id] = {}
+        else:
+            # Если пользователя вообще нет в user_data, создаем для него пустой словарь
+            context.application.user_data[user.id] = {}
+            logger.debug(f"Initialized user_data dictionary for user {user.id} (was missing).")
 
-    # 2. Теперь user_specific_data - это ТОЧНО словарь (или был создан как {}).
-    #    Выполняем pop на этом словаре.
-    #    Добавим проверку типа на всякий случай, хотя setdefault должен вернуть dict.
-    if isinstance(user_specific_data, dict):
-        user_specific_data.pop(BJ_GAME_KEY, None)
-        logger.debug(f"Cleared previous blackjack state for user {user.id}")
-    else:
-        # Эта ситуация маловероятна, но логируем на всякий случай
-        logger.warning(f"user_data for {user.id} is not a dict after setdefault: {type(user_specific_data)}. Cannot clear previous game state.")
+    except TypeError as e:
+        # Эта ошибка может возникнуть, если сам context.application.user_data не поддерживает item assignment '[user.id] = {}'
+        logger.error(f"CRITICAL: TypeError accessing application.user_data for user {user.id}. Is user_data structure correct? Error: {e}", exc_info=True)
+        # В этом случае бот, вероятно, не сможет работать с user_data вообще
+        try:
+             await update.effective_message.reply_text("Критическая ошибка хранения данных. Невозможно начать игру.")
+        except Exception as send_err:
+            logger.error(f"Failed to send critical error message: {send_err}")
+        return # Выход из функции, если структура user_data сломана
+    except Exception as e:
+        logger.error(f"Error clearing/initializing user_data for user {user.id} during game start: {e}", exc_info=True)
+        try:
+            await update.effective_message.reply_text("Произошла внутренняя ошибка при подготовке игры. Попробуйте позже.")
+        except Exception as send_err:
+            logger.error(f"Failed to send internal error message: {send_err}")
+        return # Выход из функции при других ошибках очистки
     # --- Конец очистки ---
 
-    # Дальше идет проверка баланса и остальная логика...
-    balance = await get_balance(user.id) # Используем await для асинхронной функции
 
-    balance = await get_balance(user.id) # Use await for async function
+    # Проверка баланса
+    balance = await get_balance(user.id) # Используем await для асинхронной функции
     if balance is None:
-         await source_message.reply_text("Не удалось получить ваш баланс. Попробуйте /start.", parse_mode=ParseMode.HTML)
+         # Сообщение пользователю об ошибке баланса
+         try:
+             await source_message.reply_text("Не удалось получить ваш баланс. Попробуйте /start.", parse_mode=ParseMode.HTML)
+         except Exception as send_err:
+             logger.error(f"Failed to send balance error message: {send_err}")
          return
     if balance <= 0:
-        await source_message.reply_text(f"Ваш баланс (<b>{balance:.2f}</b> F) недостаточен для игры. Попробуйте /bonus.", parse_mode=ParseMode.HTML)
+        # Сообщение пользователю о недостаточном балансе
+        try:
+            await source_message.reply_text(f"Ваш баланс (<b>{balance:.2f}</b> F) недостаточен для игры. Попробуйте /bonus.", parse_mode=ParseMode.HTML)
+        except Exception as send_err:
+             logger.error(f"Failed to send insufficient balance message: {send_err}")
         return
 
+    # Опции ставок и кнопки
     bet_options = [1, 5, 10, 25, 50, 100, 250, 500, 1000]
     valid_bets = [b for b in bet_options if b <= balance]
 
     if not valid_bets:
         min_bet = min(bet_options) if bet_options else 1
-        await source_message.reply_text(f"Ваш баланс (<b>{balance:.2f}</b> F) меньше минимальной ставки (<b>{min_bet}</b> F).", parse_mode=ParseMode.HTML)
+        try:
+            await source_message.reply_text(f"Ваш баланс (<b>{balance:.2f}</b> F) меньше минимальной ставки (<b>{min_bet}</b> F).", parse_mode=ParseMode.HTML)
+        except Exception as send_err:
+             logger.error(f"Failed to send minimum bet error message: {send_err}")
         return
 
     buttons = []
     row = []
     for bet in valid_bets:
-        # *** IMPORTANT: Use the 'bj_' prefix for game-specific callbacks ***
         row.append(InlineKeyboardButton(f"{bet} F", callback_data=f"bj_bet_{bet}"))
         if len(row) == 4:
             buttons.append(row)
             row = []
     if row:
         buttons.append(row)
-    # Add a cancel button maybe?
-    # buttons.append([InlineKeyboardButton("Отмена", callback_data="bj_cancel_start")])
 
     markup = InlineKeyboardMarkup(buttons)
     text = f"Ваш баланс: <b>{balance:.2f}</b> F.\nВыберите вашу ставку:"
 
+    # Отправка сообщения с кнопками ставок
+    sent_message = None # Инициализируем переменную перед блоком try
     try:
+        # Удаляем сообщение, с которого пришел колбэк (если это был колбэк "Новая игра")
         if callback_message_id:
             try:
                 await context.bot.delete_message(effective_chat_id, callback_message_id)
             except Exception as e:
                  logger.warning(f"Failed to delete callback message {callback_message_id} in blackjack_start_command: {e}")
 
+        # Отправляем новое сообщение с кнопками ставок
         sent_message = await context.bot.send_message(
             chat_id=effective_chat_id,
             text=text,
@@ -173,19 +208,49 @@ async def blackjack_start_command(update: Update, context: ContextTypes.DEFAULT_
             parse_mode=ParseMode.HTML
         )
 
-        # Store initial game state using application.user_data
-        context.application.user_data.setdefault(user.id, {})[BJ_GAME_KEY] = {
-            'state': 'waiting_bet',
-            'message_id': sent_message.message_id
-        }
-        logger.info(f"BJ bet prompt sent (msg {sent_message.message_id}) for user {user.id}")
-
     except Exception as e:
-        logger.error(f"BJ start error sending bet prompt for user {user.id}: {e}", exc_info=True)
+        logger.error(f"BJ start error sending bet prompt message for user {user.id}: {e}", exc_info=True)
+        # Пытаемся уведомить пользователя об ошибке
         try:
             await context.bot.send_message(effective_chat_id, "❌ Произошла ошибка при начале игры.")
-        except Exception: pass
+        except Exception as send_err:
+            logger.error(f"Failed to send game start error message: {send_err}")
+        return # Выходим, если не удалось отправить сообщение со ставками
 
+    # --- Сохранение начального состояния ---
+    # Убедимся, что сообщение было отправлено успешно перед сохранением состояния
+    if sent_message:
+        try:
+            # Получаем словарь пользователя (он должен существовать и быть словарем после блока очистки)
+            # Используем get для безопасности, хотя проверка выше должна была создать словарь
+            user_specific_data = context.application.user_data.get(user.id)
+            if isinstance(user_specific_data, dict):
+                 user_specific_data[BJ_GAME_KEY] = {
+                     'state': 'waiting_bet',
+                     'message_id': sent_message.message_id
+                 }
+                 logger.info(f"BJ bet prompt sent (msg {sent_message.message_id}) for user {user.id}. Initial state saved.")
+                 # logger.debug(f"Current user_data for {user.id}: {context.application.user_data.get(user.id)}") # Debug log
+            else:
+                # Если это не словарь после всех проверок - серьезная проблема
+                logger.error(f"CRITICAL: user_data for {user.id} is not a dict ({type(user_specific_data)}) when saving game state!")
+                raise TypeError("User data storage is corrupted.")
+
+        except Exception as e:
+            logger.error(f"BJ start error saving initial state for user {user.id}: {e}", exc_info=True)
+            try:
+                # Пытаемся удалить сообщение со ставками, так как состояние не сохранилось
+                await context.bot.delete_message(chat_id=effective_chat_id, message_id=sent_message.message_id)
+                await context.bot.send_message(effective_chat_id, "❌ Произошла ошибка при сохранении состояния игры.")
+            except Exception as cleanup_err:
+                logger.error(f"Failed to cleanup/notify after save state error: {cleanup_err}")
+            return # Выходим, если не удалось сохранить состояние
+    else:
+        # Эта ветка не должна выполняться, если блок try/except выше отработал корректно,
+        # но добавляем для полноты картины
+        logger.error(f"BJ start: sent_message object is None after sending bet prompt for user {user.id}. Cannot save state.")
+        return
+    
 async def blackjack_handle_bet(update: Update, context: ContextTypes.DEFAULT_TYPE, bet: int):
     q = update.callback_query
     u = q.from_user
