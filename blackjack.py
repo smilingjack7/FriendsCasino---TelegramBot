@@ -234,7 +234,7 @@ async def blackjack_handle_bet(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def blackjack_show_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, game_state: dict | None = None, edit_existing: bool = True, message_id_to_edit: int | None = None) -> Message | int | None:
     # Используем context.user_data
-    if game_state is None: game_state = context.user_data.get(BJ_GAME_KEY) # <- ИЗМЕНЕНИЕ
+    if game_state is None: game_state = context.user_data.get(BJ_GAME_KEY) # <- Используем context.user_data
     if not game_state: logger.warning(f"show_state user {user_id} no game state."); return None
 
     message_id_to_process = message_id_to_edit if message_id_to_edit else game_state.get('message_id')
@@ -304,25 +304,42 @@ async def blackjack_show_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
                 logger.debug(f"Edited BJ msg {message_id_to_process}"); result = message_id_to_process; break
             else:
                 logger.debug(f"Sending NEW BJ msg user {user_id} (edit_failed={edit_failed_once})")
-                # *** ИСПРАВЛЕНИЕ ЗДЕСЬ ***
                 if message_id_to_process:
                     try:
                         await context.bot.delete_message(chat_id, message_id_to_process)
                     except Exception:
                         pass # Игнорируем ошибки удаления старого сообщения
-                # *** КОНЕЦ ИСПРАВЛЕНИЯ ***
                 new_message = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
                 game_state['message_id'] = new_message.message_id # <- Обновляем ID в context.user_data
                 logger.debug(f"Sent NEW BJ msg {new_message.message_id}. Updated game state."); result = new_message; break
         except BadRequest as e:
             error_str = str(e).lower()
-            if "message is not modified" in error_str: result = message_id_to_process; logger.debug(f"Msg {message_id_to_process} not modified."); break
-            elif "message to edit not found" in error_str: logger.warning(f"Msg {message_id_to_process} edit not found. Force send new."); edit_failed_once = True; message_id_to_process = None; game_state['message_id'] = None; current_retry += 1; if current_retry > max_retries: logger.error("Failed send new after edit fail."); result = None
-            elif "chat not found" in error_str: logger.error(f"Chat {chat_id} not found update BJ state."); result = None; break
-            elif "can't parse entities" in error_str: logger.error(f"HTML Parse Error msg {message_id_to_process}: {e}\nText: {text[:200]}..."); result = None; break
-            else: logger.warning(f"Edit/Send BJ state failed (try {current_retry+1}): {e}"); result = None; current_retry += 1; await asyncio.sleep(0.5)
-        except Exception as e: logger.error(f"Unexpected error show_state (try {current_retry+1}): {e}", exc_info=True); result = None; current_retry += 1; await asyncio.sleep(0.5)
-    if result is None: logger.error(f"Failed update/send BJ state user {user_id} after attempts.")
+            if "message is not modified" in error_str:
+                result = message_id_to_process; logger.debug(f"Msg {message_id_to_process} not modified."); break
+            # *** ИСПРАВЛЕНИЕ ЗДЕСЬ ***
+            elif "message to edit not found" in error_str:
+                logger.warning(f"Msg {message_id_to_process} edit not found. Force send new.")
+                edit_failed_once = True
+                message_id_to_process = None
+                if game_state: # Убедимся, что game_state еще существует
+                    game_state['message_id'] = None
+                current_retry += 1
+                # Проверяем попытки *после* инкремента
+                if current_retry > max_retries:
+                    logger.error("Failed send new after edit fail.")
+                    result = None
+                    # Не выходим из while, позволяем циклу завершиться естественно
+            # *** КОНЕЦ ИСПРАВЛЕНИЯ ***
+            elif "chat not found" in error_str:
+                 logger.error(f"Chat {chat_id} not found update BJ state."); result = None; break
+            elif "can't parse entities" in error_str:
+                logger.error(f"HTML Parse Error msg {message_id_to_process}: {e}\nText: {text[:200]}..."); result = None; break
+            else:
+                logger.warning(f"Edit/Send BJ state failed (try {current_retry+1}): {e}"); result = None; current_retry += 1; await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Unexpected error show_state (try {current_retry+1}): {e}", exc_info=True); result = None; current_retry += 1; await asyncio.sleep(0.5)
+    if result is None:
+        logger.error(f"Failed update/send BJ state user {user_id} after attempts.")
     return result
 
 
