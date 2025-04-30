@@ -10,7 +10,7 @@ from threading import Thread
 from flask import Flask
 from html import escape as html_escape
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, Message
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode, ChatType
 from telegram.error import BadRequest, Conflict
@@ -167,91 +167,76 @@ BJ_GAME_KEY = 'blackjack_game'
 async def blackjack_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user=update.effective_user; chat=update.effective_chat; logger.info(f"BJ start {user.id} in {chat.id} ({chat.type})")
     if chat.type != ChatType.PRIVATE: await update.message.reply_text("Играть в БЖ только в <b>личном чате</b>.", parse_mode=ParseMode.HTML); return
-    reply_func=update.message.reply_text; callback_message_id=None
-    if update.callback_query: reply_func=update.callback_query.message.reply_text; callback_message_id=update.callback_query.message.message_id; await update.callback_query.answer()
-    user_game=context.user_data.get(BJ_GAME_KEY, {})
-    # Clear previous game message if it exists and wasn't the callback trigger
-    previous_message_id = user_game.get('message_id')
+    callback_message_id = None
+    source_message = update.message
+    async def reply_error(text: str):
+        target = source_message or (update.callback_query.message if update.callback_query else None)
+        if target and hasattr(target, 'reply_text'): await target.reply_text(text, parse_mode=ParseMode.HTML)
+        else: await context.bot.send_message(chat.id, text, parse_mode=ParseMode.HTML)
+    if update.callback_query: source_message = update.callback_query.message; callback_message_id = source_message.message_id; await update.callback_query.answer()
+    user_game=context.user_data.get(BJ_GAME_KEY, {}); previous_message_id = user_game.get('message_id')
     if previous_message_id and previous_message_id != callback_message_id:
         try: await context.bot.delete_message(chat.id, previous_message_id)
         except Exception as e: logger.debug(f"Old BJ msg {previous_message_id} deletion failed: {e}")
-    # Clear previous game state regardless
     context.user_data.pop(BJ_GAME_KEY, None)
-
     balance=get_balance(user.id)
-    if balance is None or balance <= 0: await reply_func(f"Баланс ({balance:.2f if balance is not None else 'N/A'}) мал."); return
+    if balance is None or balance <= 0: await reply_error(f"Баланс ({balance:.2f if balance is not None else 'N/A'}) мал."); return
     opts=[1,5,10,25,50,100,250,500]; valid=[b for b in opts if b <= balance]
-    if not valid: await reply_func(f"Баланс < мин. ставки ({min(opts)})."); return
+    if not valid: await reply_error(f"Баланс < мин. ставки ({min(opts)})."); return
     btns=[[InlineKeyboardButton(f"{b} F", callback_data=f"bj_bet_{b}") for b in r] for r in [valid[i:i+4] for i in range(0, len(valid), 4)]]
     markup=InlineKeyboardMarkup(btns); text=f"Баланс: <b>{balance:.2f}</b>. Ставка?"
     try:
-        # Delete the message that triggered this command IF it was from a button
         if callback_message_id: await context.bot.delete_message(chat.id, callback_message_id)
-        # Send the new bet prompt
-        sent=await context.bot.send_message(chat.id, text, reply_markup=markup, parse_mode=ParseMode.HTML)
+        sent = await context.bot.send_message(chat.id, text, reply_markup=markup, parse_mode=ParseMode.HTML)
         context.user_data[BJ_GAME_KEY]={'state':'waiting_bet', 'message_id':sent.message_id}; logger.info(f"BJ game started for {user.id}, prompt msg {sent.message_id}")
-    except Exception as e: logger.error(f"BJ start error {user.id}: {e}")
+    except Exception as e: logger.error(f"BJ start error {user.id}: {e}"); await reply_error("Ошибка начала игры.")
 
 async def blackjack_handle_bet(update: Update, context: ContextTypes.DEFAULT_TYPE, bet: int):
-    q=update.callback_query; u=q.from_user; uid=u.id; chat_id = q.message.chat_id
+    q=update.callback_query; u=q.from_user; uid=u.id; chat_id=q.message.chat_id
     game=context.user_data.get(BJ_GAME_KEY,{})
     bet_prompt_message_id = q.message.message_id
-
-    if not game or game.get('state') != 'waiting_bet' or game.get('message_id') != bet_prompt_message_id:
-        await q.answer("Неактуально.", show_alert=False); return
+    if not game or game.get('state') != 'waiting_bet' or game.get('message_id') != bet_prompt_message_id: await q.answer("Неактуально.", show_alert=False); return
     bal=get_balance(uid)
     if bal is None or bet <= 0 or bet > bal: await q.answer("Неверная ставка/баланс.", show_alert=True); return
     if update_balance(uid, -bet) is None: await q.answer("Ошибка списания.", show_alert=True); return
-
     deck=create_deck(); ph, dh = [], []; dlt = 0
     try:
-        for _ in range(2):
-            cp,sp=_get_next_item(deck, dlt, NUM_DECKS); ph.append(cp); dlt+=1
-            cd,sd=_get_next_item(deck, dlt, NUM_DECKS); dh.append(cd); dlt+=1
-            if sp != 0 or sd != 0: raise ValueError("Draw status")
-            if cp is None or cd is None: raise ValueError("Draw None")
-    except Exception as e:
-        logger.error(f"BJ deal {uid}: {e}"); update_balance(uid, bet)
-        try: await q.edit_message_text(f"Ошибка ({e}). Ставка возвр.")
-        except: pass
-        context.user_data.pop(BJ_GAME_KEY, None); return
+        for _ in range(2): cp,sp=_get_next_item(deck, dlt, NUM_DECKS); ph.append(cp); dlt+=1; cd,sd=_get_next_item(deck, dlt, NUM_DECKS); dh.append(cd); dlt+=1; assert sp==0 and sd==0 and cp and cd
+    except Exception as e: logger.error(f"BJ deal {uid}: {e}"); update_balance(uid, bet); await q.edit_message_text(f"Ошибка ({e}). Ставка возвр."); context.user_data.pop(BJ_GAME_KEY, None); return
 
-    p_val, dv = get_hand_value(ph), get_hand_value(dh); p_bj=(p_val==21 and len(ph)==2); d_bj=(dv==21 and len(dh)==2)
+    # --- ИСПРАВЛЕННЫЙ БЛОК ПРОВЕРКИ BJ ---
+    p_val, dv = get_hand_value(ph), get_hand_value(dh)
+    p_bj = (p_val == 21 and len(ph) == 2)
+    d_bj = (dv == 21 and len(dh) == 2)
     out, st, ps = None, 'player_turn', 'active'
+
     if p_bj:
-        ps='blackjack'; st='game_over'
-        if d_bj: out = f"⚖️ Ничья!"; update_balance(uid, bet)
-        else: w = bet*BLACKJACK_PAYOUT; update_balance(uid, bet+w); out = f"✨ БЖ! +{w:.2f} F!"
-    elif d_bj: out = f"😥 Дилер БЖ!"; st = 'game_over'
+        ps = 'blackjack'
+        st = 'game_over'
+        if d_bj:
+            out = f"⚖️ Ничья! У обоих Блекджек."
+            update_balance(uid, bet) # Возвращаем ставку
+        else:
+            w = bet * BLACKJACK_PAYOUT
+            update_balance(uid, bet + w) # Возвращаем ставку + выигрыш
+            out = f"✨ БЛЕКДЖЕК! ✨ Выигрыш {w:.2f} F!"
+    elif d_bj:
+        out = f"😥 У дилера Блекджек!"
+        st = 'game_over'
+    # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ---
 
     game.update({'state':st,'deck':deck,'cards_dealt':dlt,'player_hands':[{'hand':ph,'bet':bet,'status':ps,'can_double':(not p_bj and not d_bj),'can_split':False}],'current_hand_index':0,'dealer_hand':dh,'initial_bet':bet,'split_count':0,'outcome_text':out})
-
-    # Delete the bet prompt message
     try: await context.bot.delete_message(chat_id=chat_id, message_id=bet_prompt_message_id)
     except Exception as e: logger.warning(f"Could not delete bet prompt {bet_prompt_message_id}: {e}")
-
-    # Send the initial game state as a NEW message
     new_message = await blackjack_show_state(context, chat_id, uid, game_state=game, send_new=True)
-    if new_message:
-        game['message_id'] = new_message.message_id # Store the new message ID
-        logger.info(f"BJ initial state sent {new_message.message_id} for {uid}")
-    else:
-        logger.error(f"Failed to send initial BJ state for {uid}")
-        context.user_data.pop(BJ_GAME_KEY, None) # Clean up failed game
-
+    if new_message: game['message_id'] = new_message.message_id; logger.info(f"BJ initial state sent {new_message.message_id} for {uid}")
+    else: logger.error(f"Failed to send initial BJ state for {uid}"); context.user_data.pop(BJ_GAME_KEY, None)
     await q.answer(f"Ставка {bet} F!")
 
-# --- ИЗМЕНЕНИЕ: Добавлен параметр send_new и game_state ---
-async def blackjack_show_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, game_state: dict | None = None, message_id: int | None = None, send_new: bool = False):
-    """Отображает состояние игры. Отправляет новое сообщение или редактирует существующее."""
-    if game_state is None: # Get state from user_data if not passed directly
-        game_state = context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
-    if not game_state: return None # Return None if no game state
-
-    current_message_id = message_id or game_state.get('message_id')
-    if not send_new and not current_message_id:
-         logger.error(f"BJ show_state: No message_id to edit for user {user_id}"); return None
-
+async def blackjack_show_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, game_state: dict | None = None, message_id: int | None = None, send_new: bool = False) -> Message | None:
+    if game_state is None: game_state = context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
+    if not game_state: return None
+    previous_message_id = message_id or game_state.get('message_id')
     bal=get_balance(user_id); bal_s = f"{bal:.2f}" if bal is not None else "N/A"
     dh, phs = game_state.get('dealer_hand', []), game_state.get('player_hands', []); ci, st = game_state.get('current_hand_index', -1), game_state.get('state', '?')
     hide_d = (st == 'player_turn') and not (get_hand_value(dh) == 21 and len(dh) == 2)
@@ -274,46 +259,26 @@ async def blackjack_show_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
     elif st=='game_over': txt+=f"\n<b>Игра окончена!</b>🎉\n{game_state.get('outcome_text','')}\n"; fin_b=get_balance(user_id); txt+=f"\nБаланс:<b>{fin_b:.2f}</b> F." if fin_b is not None else ""; kbd.append([InlineKeyboardButton("🔄Новая",callback_data="bj_new_game")])
     elif st=='dealer_turn': txt += "\n<i>Ход дилера...</i>"
     mrk=InlineKeyboardMarkup(kbd) if kbd else None
-
-    sent_message = None
+    new_message = None
     try:
-        if send_new: # Always send new message
-            if current_message_id: # Try to delete previous one first
-                try: await context.bot.delete_message(chat_id, current_message_id)
-                except Exception: pass # Ignore if already deleted
-            sent_message = await context.bot.send_message(chat_id, txt, reply_markup=mrk, parse_mode=ParseMode.HTML)
-        elif current_message_id: # Edit existing message
-             await context.bot.edit_message_text(chat_id, current_message_id, txt, reply_markup=mrk, parse_mode=ParseMode.HTML)
-             sent_message = True # Indicate success without returning message object
-        else: # Should not happen if called correctly
-             logger.error(f"BJ show_state: Cannot edit - no message ID. User {user_id}")
-
-        # Update message ID in game state if a new message was sent
-        if isinstance(sent_message, User): # Correction: check if it's a Message, not User
-            game_state['message_id'] = sent_message.message_id
-        elif send_new and not sent_message: # If sending failed
-             logger.error(f"Failed to send new message for user {user_id}")
-             # Consider cleaning game state here?
-             context.user_data.pop(BJ_GAME_KEY, None)
-
-        return sent_message # Return message object if new, True if edited, None if error
-
-    except BadRequest as e:
-        if "message is not modified" not in str(e).lower(): logger.warning(f"Edit/Send BJ fail {current_message_id} chat {chat_id} (user {user_id}): {e}")
-        return None # Indicate error
-    except Exception as e: logger.error(f"Show BJ error chat {chat_id} user {user_id}: {e}"); return None
+        if previous_message_id:
+            try: await context.bot.delete_message(chat_id, previous_message_id)
+            except Exception as e: logger.debug(f"Failed to delete previous msg {previous_message_id} for user {user_id}: {e}")
+        new_message = await context.bot.send_message(chat_id, txt, reply_markup=mrk, parse_mode=ParseMode.HTML)
+        game_state['message_id'] = new_message.message_id # Update message ID in game state
+        logger.debug(f"Sent new BJ state msg {new_message.message_id} for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error deleting/sending BJ state for user {user_id}: {e}")
+        context.application.user_data.get(user_id, {}).pop(BJ_GAME_KEY, None) # Clean state on error
+    return new_message
 
 async def blackjack_handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: list):
     q=update.callback_query; u=q.from_user; uid=u.id; chat_id=q.message.chat_id; game=context.user_data.get(BJ_GAME_KEY,{})
     act,h_idx_s = parts[0], parts[1]
     try: h_idx = int(h_idx_s)
     except: return
-
-    # --- Use message_id from query for check ---
     action_message_id = q.message.message_id
-    if not game or game.get('state')!='player_turn' or game.get('message_id') != action_message_id:
-        await q.answer("Неактуально.",show_alert=False); return
-
+    if not game or game.get('state')!='player_turn' or game.get('message_id') != action_message_id: await q.answer("Неактуально.",show_alert=False); return
     phs=game.get('player_hands',[]);
     if not(0<=h_idx<len(phs)) or h_idx!=game.get('current_hand_index',-1): await q.answer("Ход др. руки.",show_alert=False); return
     hd=phs[h_idx];
@@ -327,7 +292,7 @@ async def blackjack_handle_action(update: Update, context: ContextTypes.DEFAULT_
                 hv=get_hand_value(h); await q.answer(f"{c[0]}{c[1]}")
                 if hv>21: hd['status']='bust'; await blackjack_next_action(context, chat_id, uid)
                 elif hv==21: hd['status']='stand'; await blackjack_next_action(context, chat_id, uid)
-                else: show_new_state = True # Need to show updated hand
+                else: show_new_state = True
             else: raise IndexError("Draw fail")
         elif act=='stand':
             hd['status']='stand'; await q.answer("Стоп."); await blackjack_next_action(context, chat_id, uid)
@@ -343,7 +308,7 @@ async def blackjack_handle_action(update: Update, context: ContextTypes.DEFAULT_
                 await blackjack_next_action(context, chat_id, uid)
             else: await q.answer("Нельзя удвоить.",show_alert=True)
         elif act=='split':
-             can=hd.get('can_split', False) # Check pre-calculated flag
+             can=hd.get('can_split', False)
              if can and bal is not None and bal>=b and update_balance(uid, -b) is not None:
                  game['split_count']+=1; cm=h.pop(); nh={'hand':[cm],'bet':b,'status':'active','can_double':False,'can_split':False}; phs.insert(h_idx+1, nh); cs=[];
                  for _ in range(2): c,sc=_get_next_item(dk, game['cards_dealt'], NUM_DECKS); cs.append(c if sc==0 else None); game['cards_dealt']+= (1 if c else 0)
@@ -360,30 +325,24 @@ async def blackjack_handle_action(update: Update, context: ContextTypes.DEFAULT_
                      nh['can_split']=(len(nh['hand'])==2 and nh['hand'][0] and nh['hand'][1] and get_card_value(nh['hand'][0])==get_card_value(nh['hand'][1]) and lo)
                      if get_hand_value(h)==21: hd['status']='stand'
                      if get_hand_value(nh['hand'])==21: nh['status']='stand'
-                     await q.answer("Разделено!"); show_new_state = True # Need to show updated hands/buttons
+                     await q.answer("Разделено!"); show_new_state = True
              else: await q.answer("Нельзя разделить.",show_alert=True)
-
-    except IndexError: # Triggered if _get_next_item fails
-         hd['status']='stand'; await q.answer("Не взять карту!",show_alert=True); await blackjack_next_action(context, chat_id, uid)
+    except IndexError: hd['status']='stand'; await q.answer("Не взять карту!",show_alert=True); await blackjack_next_action(context, chat_id, uid)
     except Exception as e: logger.error(f"BJ act '{act}' u {uid}: {e}", exc_info=True); await q.answer("Ошибка.",show_alert=True)
-
-    # --- ИЗМЕНЕНИЕ: Показываем состояние ОТДЕЛЬНО ---
     if show_new_state:
         await blackjack_show_state(context, chat_id, uid, game_state=game, send_new=True)
-
 
 async def blackjack_next_action(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
     game=context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
     if not game or game.get('state') != 'player_turn': return
     phs=game.get('player_hands',[]); ci=game.get('current_hand_index',-1)
     ni=next((i for i,h in enumerate(phs[ci+1:],start=ci+1) if isinstance(h,dict) and h.get('status')=='active'),-1)
-
     if ni!=-1: # Found next hand
         game['current_hand_index']=ni
         await blackjack_show_state(context, chat_id, user_id, game_state=game, send_new=True)
     else: # No more active hands -> dealer turn
         game['state']='dealer_turn'
-        await blackjack_show_state(context, chat_id, user_id, game_state=game, send_new=True) # Show "Dealer's turn..."
+        await blackjack_show_state(context, chat_id, user_id, game_state=game, send_new=True)
         context.job_queue.run_once(blackjack_dealer_turn_job, DEALER_TURN_DELAY, data={'chat_id': chat_id, 'user_id': user_id}, name=f"dealer_{user_id}")
 
 async def blackjack_dealer_turn_job(context: ContextTypes.DEFAULT_TYPE):
@@ -394,22 +353,20 @@ async def blackjack_dealer_turn_job(context: ContextTypes.DEFAULT_TYPE):
     dk,dh,phs=game.get('deck',[]),game.get('dealer_hand',[]),game.get('player_hands',[]); dlt=game.get('cards_dealt',0)
     can_w=any(isinstance(h,dict) and h.get('status') not in ['bust','blackjack'] for h in phs); d_bj=(get_hand_value(dh)==21 and len(dh)==2)
     if not can_w and not d_bj: await blackjack_determine_outcome(context, chat_id, user_id, d_bj); return
-    dealer_stood = False # Flag to avoid infinite loop on error
+    dealer_stood = False
     while not dealer_stood:
         dv=get_hand_value(dh); ac=sum(1 for c in dh if c and c[0]=='A'); soft=ac>0 and (dv-ac*11)<11
-        if dv>17 or (dv==17 and not (soft and DEALER_HITS_SOFT_17)):
-            logger.info(f"Дилер стоп {dv} у {user_id}."); dealer_stood = True; break
+        if dv>17 or (dv==17 and not (soft and DEALER_HITS_SOFT_17)): logger.info(f"Дилер стоп {dv} у {user_id}."); dealer_stood = True; break
         try:
             c, sc = _get_next_item(dk, dlt, NUM_DECKS)
             if sc == 0 and c: dh.append(c); game['cards_dealt'] += 1; dlt = game['cards_dealt']
             else: raise IndexError("Dealer draw fail")
-        except IndexError: logger.warning(f"BJ Dealer {user_id} остановился - колода пуста?"); dealer_stood = True; break # Exit while loop if draw fails
+        except IndexError: logger.warning(f"BJ Dealer {user_id} остановился - колода пуста?"); dealer_stood = True; break
     await blackjack_determine_outcome(context, chat_id, user_id, d_bj)
 
 async def blackjack_determine_outcome(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, d_had_bj: bool):
     game=context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
     if not game: return
-    # No need to check message_id here, we will send a new one
     if game.get('state')=='game_over' and 'outcome_determined' in game:
         await blackjack_show_state(context, chat_id, user_id, game_state=game, send_new=True); return
     phs,dh=game.get('player_hands',[]), game.get('dealer_hand',[]); dv=get_hand_value(dh); db=dv>21; outs,tw,tb=[],0,0
@@ -427,8 +384,7 @@ async def blackjack_determine_outcome(context: ContextTypes.DEFAULT_TYPE, chat_i
     nc=tw-tb
     if tw>0 and update_balance(user_id, tw) is None: outs.append("\n<b>ОШИБКА!</b>"); nc=-tb
     game['state']='game_over'; game['outcome_text']="\n".join(outs)+f"\n\n<b>Ваш итог:{nc:+.2f} F</b>"; game['outcome_determined']=True
-    # --- ИЗМЕНЕНИЕ: Отправляем финальное состояние новым сообщением ---
-    await blackjack_show_state(context, chat_id, user_id, game_state=game, send_new=True)
+    await blackjack_show_state(context, chat_id, user_id, game_state=game, send_new=True) # Send final state
     context.application.user_data[user_id].pop(BJ_GAME_KEY, None); logger.info(f"BJ game state cleaned {user_id}")
 
 # --- General Handlers ---
