@@ -239,7 +239,7 @@ async def blackjack_show_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
 
     message_id_to_process = message_id_to_edit if message_id_to_edit else game_state.get('message_id')
 
-    # --- Получение данных --- (Без изменений, берем из game_state)
+    # --- Получение данных ---
     balance = await get_balance(user_id)
     balance_str = f"{balance:.2f}" if balance is not None else "N/A"
     dealer_hand = game_state.get('dealer_hand', [])
@@ -251,7 +251,7 @@ async def blackjack_show_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
     all_player_hands_finished = all(hdata.get('status') in ['bust', 'stand', 'blackjack'] for hdata in player_hands_data if isinstance(hdata, dict))
     hide_dealer_card = (state == 'player_turn' and not dealer_has_blackjack and not all_player_hands_finished)
 
-    # --- Построение текста --- (Без изменений)
+    # --- Построение текста ---
     text = f"<b>Блекджек</b> | Баланс: <b>{balance_str}</b> F\n"
     total_bet = sum(h.get('bet', 0) for h in player_hands_data if isinstance(h, dict))
     num_hands = len(player_hands_data)
@@ -271,14 +271,14 @@ async def blackjack_show_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
         text += status_label + "\n"
         if is_current_turn: active_hand_data = hand_data
 
-    # --- Построение клавиатуры --- (Проверка баланса добавлена)
+    # --- Построение клавиатуры ---
     keyboard = []
     if active_hand_data and state == 'player_turn':
         player_hand = active_hand_data.get('hand', []); player_bet = active_hand_data.get('bet', 0)
-        current_balance = await get_balance(user_id) # Свежий баланс для проверки
+        current_balance = await get_balance(user_id)
         can_double = (active_hand_data.get('can_double', False) and len(player_hand) == 2 and current_balance is not None and current_balance >= player_bet)
         can_split = (len(player_hand) == 2 and player_hand[0] and player_hand[1] and get_card_value(player_hand[0]) == get_card_value(player_hand[1]) and current_balance is not None and current_balance >= player_bet and game_state.get('split_count', 0) < MAX_SPLITS)
-        active_hand_data['can_split'] = can_split # Обновляем возможность
+        active_hand_data['can_split'] = can_split
         action_buttons = [InlineKeyboardButton("Еще", callback_data=f"bj_hit_{current_hand_idx}"), InlineKeyboardButton("Хватит", callback_data=f"bj_stand_{current_hand_idx}")]
         keyboard.append(action_buttons)
         special_buttons = []
@@ -294,7 +294,7 @@ async def blackjack_show_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
         text += "\n<i>⏳ Ход дилера...</i>"
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
-    # --- Отправка / Редактирование --- (Логика без изменений, но game_state из context.user_data)
+    # --- Отправка / Редактирование ---
     result: Message | int | None = None; max_retries = 1; current_retry = 0; edit_failed_once = False
     while current_retry <= max_retries:
         try:
@@ -304,7 +304,13 @@ async def blackjack_show_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
                 logger.debug(f"Edited BJ msg {message_id_to_process}"); result = message_id_to_process; break
             else:
                 logger.debug(f"Sending NEW BJ msg user {user_id} (edit_failed={edit_failed_once})")
-                if message_id_to_process: try: await context.bot.delete_message(chat_id, message_id_to_process); except Exception: pass
+                # *** ИСПРАВЛЕНИЕ ЗДЕСЬ ***
+                if message_id_to_process:
+                    try:
+                        await context.bot.delete_message(chat_id, message_id_to_process)
+                    except Exception:
+                        pass # Игнорируем ошибки удаления старого сообщения
+                # *** КОНЕЦ ИСПРАВЛЕНИЯ ***
                 new_message = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
                 game_state['message_id'] = new_message.message_id # <- Обновляем ID в context.user_data
                 logger.debug(f"Sent NEW BJ msg {new_message.message_id}. Updated game state."); result = new_message; break
