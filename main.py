@@ -534,13 +534,13 @@ async def blackjack_show_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
 
 
 async def blackjack_handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: list):
-    q=update.callback_query
-    u=q.from_user
-    uid=u.id
-    chat_id=q.message.chat_id
-    game=context.user_data.get(BJ_GAME_KEY,{})
+    q = update.callback_query
+    u = q.from_user
+    uid = u.id
+    chat_id = q.message.chat_id
+    game = context.user_data.get(BJ_GAME_KEY, {})
 
-    act,h_idx_s = parts[0], parts[1]
+    act, h_idx_s = parts[0], parts[1]
     try:
         h_idx = int(h_idx_s)
     except (ValueError, TypeError):
@@ -550,147 +550,157 @@ async def blackjack_handle_action(update: Update, context: ContextTypes.DEFAULT_
 
     action_message_id = q.message.message_id
     # Validate game state and message ID
-    if not game or game.get('state')!='player_turn' or game.get('message_id') != action_message_id:
-        await q.answer("Неактуально.",show_alert=False)
+    if not game or game.get('state') != 'player_turn' or game.get('message_id') != action_message_id:
+        await q.answer("Неактуально.", show_alert=False)
         return
 
-    phs=game.get('player_hands',[])
+    phs = game.get('player_hands', [])
     # Validate hand index and current turn
-    if not(0<=h_idx<len(phs)) or h_idx!=game.get('current_hand_index',-1):
-        await q.answer("Ход другой руки.",show_alert=False)
+    if not (0 <= h_idx < len(phs)) or h_idx != game.get('current_hand_index', -1):
+        await q.answer("Ход другой руки.", show_alert=False)
         return
 
-    hd=phs[h_idx] # Current hand data
+    hd = phs[h_idx]  # Current hand data
     # Validate hand status
-    if not isinstance(hd,dict) or hd.get('status')!='active':
-        await q.answer("Эта рука неактивна.",show_alert=False)
+    if not isinstance(hd, dict) or hd.get('status') != 'active':
+        await q.answer("Эта рука неактивна.", show_alert=False)
         return
 
-    h = hd.get('hand',[])
-    dk = game.get('deck',[])
+    h = hd.get('hand', [])
+    dk = game.get('deck', [])
     bal = get_balance(uid)
-    b = hd.get('bet',0)
-    dlt = game.get('cards_dealt',0)
-    needs_edit = False # Flag to indicate if the state message needs updating
+    b = hd.get('bet', 0)
+    dlt = game.get('cards_dealt', 0)
+    # needs_edit flag is removed, call show_state explicitly
 
-    try: # Main action block
-        if act=='hit':
+    try:  # Main action block
+        if act == 'hit':
             c, sc = _get_next_item(dk, dlt, NUM_DECKS)
-            # *** ИСПРАВЛЕННЫЙ БЛОК ***
             if sc == 0 and c:
                 h.append(c)
                 game['cards_dealt'] += 1
-                hd['can_double'] = False # Cannot double/split after hit
+                hd['can_double'] = False  # Cannot double/split after hit
                 hd['can_split'] = False
                 hv = get_hand_value(h)
                 await q.answer(f"Взяли: {c[0]}{c[1]}")
-                # Check hand value after hitting
+
+                # Check hand value AFTER hitting
                 if hv > 21:
                     hd['status'] = 'bust'
-                    await blackjack_next_action(context, chat_id, uid) # Move to next action (next hand or dealer)
+                    # Update message IMMEDIATELY to show bust
+                    await blackjack_show_state(context, chat_id, uid, game_state=game, edit_existing=True)
+                    await blackjack_next_action(context, chat_id, uid) # Move to next action
                 elif hv == 21:
                     hd['status'] = 'stand' # Auto-stand on 21
+                     # Update message IMMEDIATELY to show stand/21
+                    await blackjack_show_state(context, chat_id, uid, game_state=game, edit_existing=True)
                     await blackjack_next_action(context, chat_id, uid) # Move to next action
                 else: # Hand value < 21, turn continues for this hand
-                    needs_edit = True # Update display
+                    # Update message IMMEDIATELY to show new card and value
+                    await blackjack_show_state(context, chat_id, uid, game_state=game, edit_existing=True)
+                    # Do NOT call next_action here, player can hit again
             else:
                 # Failed to draw a card
                 raise IndexError("Draw fail")
-            # *** КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ***
 
-        elif act=='stand':
-            hd['status']='stand'
+        elif act == 'stand':
+            hd['status'] = 'stand'
             await q.answer("Стоп.")
+            # Update message IMMEDIATELY to show stand status
+            await blackjack_show_state(context, chat_id, uid, game_state=game, edit_existing=True)
             await blackjack_next_action(context, chat_id, uid) # Move to next action
 
-        elif act=='double':
+        elif act == 'double':
             can_double = (hd.get('can_double', False) and len(h) == 2 and bal is not None and bal >= b)
             if can_double:
-                if update_balance(uid, -b) is not None: # Try to deduct bet
-                    hd['bet'] += b # Double the bet on this hand
-                    hd['can_double'] = False # Can't double again
+                if update_balance(uid, -b) is not None:  # Try to deduct bet
+                    hd['bet'] += b  # Double the bet on this hand
+                    hd['can_double'] = False  # Can't double again
                     hd['can_split'] = False
                     c, sc = _get_next_item(dk, game['cards_dealt'], NUM_DECKS)
+                    drawn_card_str = ""
                     if sc == 0 and c:
                         h.append(c)
                         game['cards_dealt'] += 1
                         hv = get_hand_value(h)
-                        hd['status'] = 'bust' if hv > 21 else 'stand' # Hand automatically stands or busts after double
-                        await q.answer(f"Удвоено! Карта: {c[0]}{c[1]}. Итог: {hv}{' (Перебор!)' if hv>21 else ''}")
-                    else: # Failed to draw card after doubling bet (rare, but handle)
+                        hd['status'] = 'bust' if hv > 21 else 'stand' # Hand automatically stands or busts
+                        drawn_card_str = f" Карта: {c[0]}{c[1]}. Итог: {hv}{' (Перебор!)' if hv > 21 else ''}"
+                    else:  # Failed to draw card after doubling bet
                         hd['status'] = 'stand' # Stand with original 2 cards
-                        await q.answer("Удвоено! Ошибка взятия карты.", show_alert=True)
-                        # Note: Bet was already doubled and deducted.
+                        drawn_card_str = " Ошибка взятия карты."
+                        await q.answer(f"Удвоено!{drawn_card_str}", show_alert=True if "Ошибка" in drawn_card_str else False)
+                    # Update message IMMEDIATELY to show doubled hand/status
+                    await blackjack_show_state(context, chat_id, uid, game_state=game, edit_existing=True)
                     await blackjack_next_action(context, chat_id, uid) # Move to next action
                 else:
                     await q.answer("Ошибка списания для удвоения.", show_alert=True)
             else:
                 await q.answer("Нельзя удвоить.", show_alert=True)
 
-        elif act=='split':
-             can_split = hd.get('can_split', False) # Already checked in show_state, re-check here for safety
+        elif act == 'split':
+             can_split = hd.get('can_split', False)
              if can_split and bal is not None and bal >= b:
                  if update_balance(uid, -b) is not None: # Deduct bet for the new hand
                      game['split_count'] += 1
-                     card_to_move = h.pop() # Take second card for the new hand
+                     card_to_move = h.pop()
                      new_hand_data = {'hand': [card_to_move], 'bet': b, 'status': 'active', 'can_double': False, 'can_split': False}
-                     phs.insert(h_idx + 1, new_hand_data) # Insert new hand right after current one
+                     phs.insert(h_idx + 1, new_hand_data)
 
-                     # Deal one card to each new hand
                      cards_drawn = []
                      for _ in range(2):
                          c, sc = _get_next_item(dk, game['cards_dealt'], NUM_DECKS)
                          cards_drawn.append(c if sc == 0 else None)
                          if c: game['cards_dealt'] += 1
 
-                     if cards_drawn[0]: h.append(cards_drawn[0]) # Add card to original hand
-                     if cards_drawn[1]: new_hand_data['hand'].append(cards_drawn[1]) # Add card to new hand
+                     if cards_drawn[0]: h.append(cards_drawn[0])
+                     if cards_drawn[1]: new_hand_data['hand'].append(cards_drawn[1])
 
-                     # Special rule: If Aces are split, each hand gets only one card and stands
-                     is_ace_split = get_card_value(h[0]) == 11 # Check if original card was Ace
+                     is_ace_split = get_card_value(h[0]) == 11
                      if is_ace_split:
                          hd['status'] = 'stand'
                          new_hand_data['status'] = 'stand'
                          hd['can_double'] = False
                          new_hand_data['can_double'] = False
                          await q.answer("Тузы разделены и стоят.")
-                         await blackjack_next_action(context, chat_id, uid) # Check if next hand exists (the one just created)
+                         # Update message IMMEDIATELY to show split hands (standing)
+                         await blackjack_show_state(context, chat_id, uid, game_state=game, edit_existing=True)
+                         await blackjack_next_action(context, chat_id, uid)
                      else:
                          # Check if hands are 21 after split and deal
                          if get_hand_value(h) == 21: hd['status'] = 'stand'
                          if get_hand_value(new_hand_data['hand']) == 21: new_hand_data['status'] = 'stand'
 
-                         # Allow doubling on new hands if applicable (usually allowed)
                          hd['can_double'] = (len(h) == 2)
                          new_hand_data['can_double'] = (len(new_hand_data['hand']) == 2)
 
-                         # Check if re-splitting is possible (if allowed by rules and MAX_SPLITS)
                          limit_ok = game['split_count'] < MAX_SPLITS
-                         h_can_resplit = (len(h) == 2 and h[0] and h[1] and get_card_value(h[0]) == get_card_value(h[1]) and limit_ok)
-                         nh_can_resplit = (len(new_hand_data['hand']) == 2 and new_hand_data['hand'][0] and new_hand_data['hand'][1] and get_card_value(new_hand_data['hand'][0]) == get_card_value(new_hand_data['hand'][1]) and limit_ok)
+                         h_can_resplit = (len(h) == 2 and h[0] and h[1] and get_card_value(h[0]) == get_card_value(h[1]) and limit_ok and bal >= hd['bet']) # Check balance for resplit too
+                         nh_can_resplit = (len(new_hand_data['hand']) == 2 and new_hand_data['hand'][0] and new_hand_data['hand'][1] and get_card_value(new_hand_data['hand'][0]) == get_card_value(new_hand_data['hand'][1]) and limit_ok and bal >= new_hand_data['bet'])
                          hd['can_split'] = h_can_resplit
                          new_hand_data['can_split'] = nh_can_resplit
 
                          await q.answer("Рука разделена!")
-                         needs_edit = True # Update display to show two hands
+                         # Update message IMMEDIATELY to show the two new hands
+                         await blackjack_show_state(context, chat_id, uid, game_state=game, edit_existing=True)
+                         # Do NOT call next_action, turn continues on the first split hand (h_idx)
                  else:
                      await q.answer("Ошибка списания для разделения.", show_alert=True)
              else:
                 await q.answer("Нельзя разделить.", show_alert=True)
 
     except IndexError as e: # Catch the "Draw fail" specifically
-        hd['status']='stand' # Force stand if card draw fails
         logger.warning(f"BJ action '{act}' u {uid} failed draw: {e}")
-        await q.answer("Не удалось взять карту!",show_alert=True)
+        hd['status']='stand' # Force stand if card draw fails? Or just error out? Let's force stand for now.
+        await q.answer("Не удалось взять карту! Ход завершен.", show_alert=True)
+        # Update message to show the forced stand?
+        await blackjack_show_state(context, chat_id, uid, game_state=game, edit_existing=True)
         await blackjack_next_action(context, chat_id, uid) # Proceed as if stood
     except Exception as e:
         logger.error(f"BJ action '{act}' u {uid} error: {e}", exc_info=True)
-        await q.answer("Произошла ошибка.",show_alert=True)
-        # Consider cleaning up game state here? Or let it continue if possible? For now, just report.
+        await q.answer("Произошла ошибка.", show_alert=True)
+        # Optionally update state or clean up game here if error is severe
 
-    if needs_edit:
-        await blackjack_show_state(context, chat_id, uid, game_state=game, edit_existing=True) # Update the message
-
+    # The final 'if needs_edit:' check is removed as updates are handled within each action block.
 
 async def blackjack_next_action(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
     game=context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
