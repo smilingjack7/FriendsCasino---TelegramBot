@@ -963,7 +963,6 @@ async def blackjack_dealer_turn_job(context: ContextTypes.DEFAULT_TYPE):
     game = context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
 
     # --- Validations ---
-    # Check if game still exists, is in dealer_turn state, and matches the message ID
     if not game or game.get('state') != 'dealer_turn' or game.get('message_id') != message_id:
         logger.info(f"BJ Dealer job for user {user_id} (msg {message_id}): Game ended, state changed, or message mismatch. Job aborted.")
         return
@@ -972,63 +971,77 @@ async def blackjack_dealer_turn_job(context: ContextTypes.DEFAULT_TYPE):
     deck = game.get('deck', [])
     dealer_hand = game.get('dealer_hand', [])
     player_hands = game.get('player_hands', [])
+    dealer_value_initial = get_hand_value(dealer_hand) # Value before hitting
+    dealer_has_blackjack = (dealer_value_initial == 21 and len(dealer_hand) == 2)
 
-    # Check if dealer needs to hit (i.e., if any player hand didn't bust or get BJ)
     player_can_win = any(
         isinstance(h, dict) and h.get('status') not in ['bust', 'blackjack']
         for h in player_hands
     )
-    dealer_value = get_hand_value(dealer_hand)
-    dealer_has_blackjack = (dealer_value == 21 and len(dealer_hand) == 2)
 
-    # If all players busted/got BJ and dealer doesn't have BJ, dealer doesn't need to hit.
-    if not player_can_win and not dealer_has_blackjack:
-        logger.info(f"BJ Dealer user {user_id}: All players busted/BJ, dealer stands immediately.")
-        await blackjack_determine_outcome(context, chat_id, user_id, dealer_has_blackjack)
-        return
+    dealer_needs_to_hit = player_can_win or dealer_has_blackjack # Dealer hits even if player busts, if dealer has BJ (for push)
 
-    # --- Dealer Drawing Loop ---
     dealer_stood = False
-    while not dealer_stood:
-        current_dealer_value = get_hand_value(dealer_hand)
-        num_aces = sum(1 for c in dealer_hand if c and c[0] == 'A')
-        # Check if hand value calculation includes Ace as 11
-        is_soft = num_aces > 0 and (current_dealer_value + 10 * num_aces > 21 and current_dealer_value <= 21) # A more robust soft check might be needed depending on get_hand_value impl.
-        # Simplified: Let get_hand_value handle ace logic
-        is_soft = 'A' in [c[0] for c in dealer_hand if c] and current_dealer_value <= 11 + (len([c for c in dealer_hand if c and c[0] != 'A']) ) # Basic soft check
+    hit_occurred = False # Track if dealer actually took a card
 
-        # Dealer Stand Conditions
-        if current_dealer_value > 17:
-            dealer_stood = True
-        elif current_dealer_value == 17:
-             if not (is_soft and DEALER_HITS_SOFT_17): # Stand on hard 17, or soft 17 if rule applies
-                 dealer_stood = True
+    if dealer_needs_to_hit:
+        # --- Dealer Drawing Loop ---
+        while not dealer_stood:
+            current_dealer_value = get_hand_value(dealer_hand)
+            num_aces = sum(1 for c in dealer_hand if c and c[0] == 'A')
+            # A simple soft check: has Ace and value is <= 21 if Ace is 11
+            is_soft = num_aces > 0 and (current_dealer_value - num_aces * 11 < 11)
 
-        if dealer_stood:
-            logger.info(f"BJ Dealer user {user_id} stands on {current_dealer_value}{' (soft)' if is_soft and current_dealer_value==17 else ''}.")
-            break # Exit the while loop
+            # Dealer Stand Conditions
+            stand_value_met = False
+            if current_dealer_value > 17:
+                stand_value_met = True
+            elif current_dealer_value == 17:
+                if not (is_soft and DEALER_HITS_SOFT_17): # Stand on hard 17, or soft 17 if rule applies
+                    stand_value_met = True
 
-        # Dealer Hits
-        logger.info(f"BJ Dealer user {user_id} hits on {current_dealer_value}{' (soft)' if is_soft else ''}.")
-        card = draw_card(deck)
-        if card:
-            dealer_hand.append(card)
-            game['cards_dealt'] = game.get('cards_dealt', 0) + 1
-            # OPTIONAL: Update message to show dealer drawing (can spam edits)
-            # await blackjack_show_state(context, chat_id, user_id, game_state=game, edit_existing=True)
-            await asyncio.sleep(DEALER_TURN_DELAY / 2) # Shorter delay between hits maybe?
-        else:
-            # Failed to draw card
-            logger.warning(f"BJ Dealer user {user_id} failed to draw card (deck empty?). Standing.")
-            dealer_stood = True # Stop hitting if card cannot be drawn
-            break # Exit the while loop
+            if stand_value_met:
+                if not hit_occurred: # Log stand only if no hits occurred before this check
+                     logger.info(f"BJ Dealer user {user_id} stands initially on {current_dealer_value}{' (soft)' if is_soft and current_dealer_value==17 else ''}.")
+                dealer_stood = True
+                break # Exit the while loop
+
+            # Dealer Hits
+            logger.info(f"BJ Dealer user {user_id} hits on {current_dealer_value}{' (soft)' if is_soft else ''}.")
+            card = draw_card(deck)
+            if card:
+                dealer_hand.append(card)
+                game['cards_dealt'] = game.get('cards_dealt', 0) + 1
+                hit_occurred = True # Mark that a hit happened
+                # Optional: Update message during hits (can cause flicker/rate limit)
+                # await blackjack_show_state(context, chat_id, user_id, game_state=game, edit_existing=True)
+                await asyncio.sleep(DEALER_TURN_DELAY * 0.6) # Small delay between hits
+            else:
+                logger.warning(f"BJ Dealer user {user_id} failed to draw card (deck empty?). Standing.")
+                dealer_stood = True # Stop hitting if card cannot be drawn
+                break # Exit the while loop
+    else:
+        # Dealer doesn't need to hit (e.g., all players busted and dealer no BJ)
+        logger.info(f"BJ Dealer user {user_id}: No player can win and dealer no BJ. Dealer stands immediately.")
+        dealer_stood = True
+
+
+    # --- AFTER the loop (or skipped) ---
+    final_dealer_value = get_hand_value(dealer_hand)
+    logger.info(f"BJ Dealer user {user_id}: Finished turn with value {final_dealer_value}. Updating display before outcome.")
+
+    # *** KEY CHANGE: Update display to show final dealer hand ***
+    # The state is still technically 'dealer_turn' until determine_outcome changes it,
+    # but show_state will reveal the card because it's not 'player_turn'.
+    update_success = await blackjack_show_state(context, chat_id, user_id, game_state=game, edit_existing=True)
+
+    # Optional delay so user can see the revealed hand/result of hits
+    if update_success:
+        await asyncio.sleep(DEALER_TURN_DELAY * 0.8) # Adjust delay as needed
 
     # --- Determine Outcome ---
-    # Final dealer value after standing or busting
-    final_dealer_value = get_hand_value(dealer_hand)
-    logger.info(f"BJ Dealer user {user_id}: Finished turn with value {final_dealer_value}. Determining outcome.")
+    # Pass the initial BJ status, as that's what matters for player BJ payout/push
     await blackjack_determine_outcome(context, chat_id, user_id, dealer_has_blackjack)
-
 
 async def blackjack_determine_outcome(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, d_had_bj: bool):
     """ Calculates results for each hand, updates balance, shows final state, and cleans up. """
