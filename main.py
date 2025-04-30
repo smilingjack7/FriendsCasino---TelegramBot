@@ -11,7 +11,7 @@ from flask import Flask # Для keep_alive
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Conflict # Добавили Conflict
 import math
 import psycopg2 # Используем PostgreSQL
 from psycopg2.extras import RealDictCursor # Для удобного получения словарей
@@ -26,7 +26,11 @@ def home():
 
 def run_web_server():
   port = int(os.environ.get("PORT", 8080))
+  # Уменьшаем логи werkzeug
+  log = logging.getLogger('werkzeug')
+  log.setLevel(logging.WARNING)
   app.run(host='0.0.0.0', port=port, use_reloader=False)
+
 
 def keep_alive():
     t = Thread(target=run_web_server, daemon=True)
@@ -48,7 +52,7 @@ NUM_DECKS = 8
 DEALER_HITS_SOFT_17 = True
 BLACKJACK_PAYOUT = 1.5
 MAX_SPLITS = 3
-DEALER_TURN_DELAY = 0.2 # Задержка перед/между ходами дилера (в секундах)
+DEALER_TURN_DELAY = 0.3 # Немного увеличим задержку для наглядности
 LEADERBOARD_LIMIT = 10
 # RESHUFFLE_MESSAGE = "..." # Убрано
 
@@ -57,7 +61,8 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger('werkzeug').setLevel(logging.WARNING) # Уменьшаем логи Flask/Werkzeug
+# logging.getLogger('werkzeug').setLevel(logging.WARNING) # Уменьшаем логи Flask/Werkzeug - уже сделано в run_web_server
+logging.getLogger("telegram.ext").setLevel(logging.INFO) # Можно поставить WARNING для уменьшения логов библиотеки
 logger = logging.getLogger(__name__)
 
 # --- Standard Card Definitions ---
@@ -145,7 +150,7 @@ def update_balance(user_id: int, amount_change: float):
                 result = cursor.fetchone()
                 if result:
                     new_balance = result[0]
-                    logger.info(f"Баланс пользователя {user_id} изменен на {amount_change:+}. Новый баланс: {new_balance:.2f}")
+                    logger.info(f"Баланс пользователя {user_id} изменен на {amount_change:+.2f}. Новый баланс: {new_balance:.2f}")
                 else:
                      logger.warning(f"Не удалось обновить баланс для пользователя {user_id} (не найден?).")
         return new_balance # Может быть None, если пользователь не найден
@@ -258,9 +263,6 @@ def format_hand(hand, hide_one=False): # <<< Имя параметра: hide_one
         first_card = hand[0]
         # Убедимся, что первая карта не None перед форматированием
         first_card_str = f"{first_card[0]}{first_card[1]}" if first_card else "??"
-        # Показываем остальные карты, если их больше двух (хотя обычно скрывается только вторая)
-        # other_cards_str = ", ".join([f"{c[0]}{c[1]}" for c in hand[2:] if c])
-        # return f"[{first_card_str}, ??{', ' + other_cards_str if other_cards_str else ''}]"
         # Упрощенный вариант: скрываем все после первой карты
         return f"[{first_card_str}, ??]"
 
@@ -296,17 +298,28 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help."""
     user_id = update.effective_user.id
     logger.info(f"Команда /help от пользователя {user_id}")
+    # --- ИЗМЕНЕНИЕ: Экранируем дефисы для MarkdownV2 ---
     help_text = (
         "ℹ️ *Список доступных команд:*\n\n"
-        "/start - Приветствие и проверка баланса\n"
-        "/blackjack - Начать новую игру в Блекджек\n"
-        "/balance - Показать ваш текущий баланс\n"
-        f"/bonus - Получить ежедневный бонус ({BONUS_AMOUNT} фишек, раз в {BONUS_COOLDOWN_HOURS} ч)\n"
-        "/leaderboard - Показать таблицу лидеров\n"
-        "/help - Показать это сообщение помощи"
+        "/start \\- Приветствие и проверка баланса\n"
+        "/blackjack \\- Начать новую игру в Блекджек\n"
+        "/balance \\- Показать ваш текущий баланс\n"
+        f"/bonus \\- Получить ежедневный бонус ({BONUS_AMOUNT} фишек, раз в {BONUS_COOLDOWN_HOURS} ч)\n"
+        "/leaderboard \\- Показать таблицу лидеров\n"
+        "/help \\- Показать это сообщение помощи"
     )
+    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
     # Используем MarkdownV2 для форматирования
-    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
+    try:
+        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
+    except BadRequest as e:
+        logger.error(f"Ошибка отправки /help с MarkdownV2: {e}")
+        # Фоллбэк на обычный текст, если Markdown не сработал
+        plain_text = help_text.replace("\\-","-").replace("*","").replace("_","").replace("ℹ️","") # Убираем форматирование
+        try:
+            await update.message.reply_text(plain_text)
+        except Exception as fe:
+             logger.error(f"Не удалось отправить /help даже как обычный текст: {fe}")
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /balance."""
@@ -363,8 +376,15 @@ async def bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Функция для безопасного экранирования MarkdownV2 символов
 def escape_markdown(text):
     """Экранирует специальные символы Markdown V2."""
+    # ВАЖНО: Символ `\` сам должен быть экранирован последним!
     escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return ''.join(f'\\{char}' if char in escape_chars else char for char in str(text))
+    # Экранируем все символы, кроме `\`
+    temp_text = ''.join(f'\\{char}' if char in escape_chars else char for char in str(text))
+    # Экранируем `\` отдельно
+    # return temp_text.replace('\\', '\\\\') # Не нужно, PTB делает это сама? Проверим. Нет, нужно.
+    # Нет, PTB не экранирует \ сама. Правильно так:
+    return ''.join(f'\\{char}' if char in escape_chars + '\\' else char for char in str(text))
+
 
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /leaderboard."""
@@ -376,7 +396,7 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Таблица лидеров пока пуста или произошла ошибка при загрузке.")
         return
 
-    leaderboard_text = "🏆 **Таблица Лидеров** 🏆\n\n"
+    leaderboard_text = "🏆 *Таблица Лидеров*\n\n" # Используем Markdown V1
 
     async def get_user_info(user_id_to_fetch):
         """Асинхронно получает информацию о пользователе с кэшированием."""
@@ -386,17 +406,14 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             now = datetime.datetime.now()
 
             if user_id_to_fetch in cache and (now - cache[user_id_to_fetch]['timestamp']).total_seconds() < cache_expiry_seconds:
-                 # logger.debug(f"Cache hit for user {user_id_to_fetch}")
                  return cache[user_id_to_fetch]['user']
 
-            # logger.debug(f"Cache miss for user {user_id_to_fetch}, fetching from API...")
             user_chat = await context.bot.get_chat(user_id_to_fetch)
             cache[user_id_to_fetch] = {'user': user_chat, 'timestamp': now}
             return user_chat
         except BadRequest as e:
-            # Частая ошибка, если юзер заблокировал бота или ID невалидный
             if "chat not found" in str(e).lower():
-                 logger.warning(f"Failed to get chat info for user {user_id_to_fetch} (BadRequest: Chat not found)")
+                 logger.warning(f"Failed to get chat info for user {user_id_to_fetch} (Chat not found)")
             else:
                  logger.warning(f"Failed to get chat info for user {user_id_to_fetch} (BadRequest: {e})")
             return None
@@ -404,7 +421,6 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Failed to get user info for user {user_id_to_fetch}: {e}", exc_info=True)
             return None
 
-    # Асинхронно собираем информацию о пользователях из топ-листа
     user_info_tasks = [get_user_info(leader['user_id']) for leader in leaders]
     users_info: list[User | None] = await asyncio.gather(*user_info_tasks)
 
@@ -413,43 +429,39 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, leader in enumerate(leaders):
         db_user_id = leader['user_id']
         balance = leader['balance']
-        user_chat_info: User | None = users_info[i] # Может быть None
+        user_chat_info: User | None = users_info[i]
 
-        # Формирование имени пользователя для отображения
-        user_name_display = escape_markdown(f"User ID: {db_user_id}") # Запасной вариант
+        # Формирование имени пользователя (используем Markdown V1 - HTML escape)
+        user_name_display = f"User ID: {db_user_id}" # Запасной вариант
         if user_chat_info:
-            name_to_display = user_chat_info.first_name or user_chat_info.full_name
-            if name_to_display: # Если есть имя
-                 safe_name = escape_markdown(name_to_display)
-                 # Пытаемся создать упоминание (@username), если есть username, иначе просто имя
-                 user_name_display = user_chat_info.mention_markdown_v2(safe_name) if user_chat_info.username else safe_name
-            # Если имени нет, но есть username
-            elif user_chat_info.username:
-                 user_name_display = escape_markdown(f"@{user_chat_info.username}")
+            # Получаем имя и экранируем HTML сущности
+            from html import escape as html_escape
+            name_to_display = html_escape(user_chat_info.first_name or user_chat_info.full_name or f"User_{db_user_id}")
+            # Создаем ссылку на пользователя, если есть username
+            if user_chat_info.username:
+                user_name_display = f"@{html_escape(user_chat_info.username)}" # Не ссылка, а просто @username
+                # Или можно сделать реальную ссылку (но менее красиво выглядит)
+                # user_name_display = f'<a href="tg://user?id={db_user_id}">{name_to_display}</a>'
+            else: # Если нет username, просто имя
+                 user_name_display = name_to_display
 
-        # Индикатор места (эмодзи или номер)
-        place_indicator = place_emojis[i] if i < len(place_emojis) else f"{escape_markdown(str(i+1))}."
-        # Экранированный баланс
-        balance_str = escape_markdown(f"{balance:.2f}")
+        place_indicator = place_emojis[i] if i < len(place_emojis) else f"{i+1}."
+        balance_str = f"{balance:.2f}" # Баланс не нужно экранировать для V1
 
-        leaderboard_text += f"{place_indicator} {user_name_display} \\- `{balance_str}` фишек\n"
+        leaderboard_text += f"{place_indicator} {user_name_display} - `{balance_str}` фишек\n" # Используем ` для моноширинного шрифта баланса
 
     try:
-        # Отправляем сообщение с использованием MarkdownV2
-        await update.message.reply_text(leaderboard_text, parse_mode=ParseMode.MARKDOWN_V2)
-    except BadRequest as e:
-        # Если ошибка связана с форматированием Markdown
-        logger.error(f"Error sending leaderboard (MarkdownV2 BadRequest): {e}")
-        # Попытка отправить как обычный текст (убираем символы экранирования)
-        plain_text = leaderboard_text.replace("\\", "").replace("`", "")
+        # Отправляем сообщение с использованием Markdown V1
+        await update.message.reply_text(leaderboard_text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        # Ошибки при отправке
+        logger.error(f"Error sending leaderboard: {e}", exc_info=True)
+        # Попытка отправить как обычный текст
+        plain_text = leaderboard_text.replace("*","").replace("`","") # Убираем форматирование
         try:
             await update.message.reply_text(plain_text)
-            logger.info("Sent leaderboard as plain text fallback due to MarkdownV2 error.")
         except Exception as fe:
             logger.error(f"Error sending plain text leaderboard fallback: {fe}")
-    except Exception as e:
-        # Другие возможные ошибки при отправке
-        logger.error(f"Error sending leaderboard (Other): {e}", exc_info=True)
 
 
 # --- Blackjack Game Logic Handlers ---
@@ -461,24 +473,17 @@ async def blackjack_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Команда /blackjack от пользователя {user.full_name} ({user.id}) в чате {chat_id}")
 
     reply_func = None
-    message_to_delete_id = None # ID сообщения, которое нужно удалить (старое игровое или с кнопкой "Новая игра")
+    message_to_delete_id = None # ID сообщения, которое нужно удалить
 
-    # Определяем, как отвечать (на сообщение или callback)
     if update.callback_query:
-        # Запрос пришел от кнопки (например, "Новая игра")
-        reply_func = update.callback_query.message.reply_text # Отвечаем новым сообщением в чат
-        message_to_delete_id = update.callback_query.message.message_id # Запоминаем ID сообщения с кнопкой
-        try:
-            await update.callback_query.answer() # Отвечаем на callback, чтобы убрать "часики"
+        reply_func = update.callback_query.message.reply_text
+        message_to_delete_id = update.callback_query.message.message_id
+        try: await update.callback_query.answer()
         except BadRequest as e:
-            # Игнорируем ошибки для старых запросов
             if "query is too old" not in str(e).lower(): logger.warning(f"BJ Start CB Answer Error: {e}")
-            else: pass
     elif update.message:
-        # Запрос пришел от команды /blackjack
         reply_func = update.message.reply_text
     else:
-        # Неожиданный случай, не должно происходить
         logger.warning("blackjack_start вызван без message или callback_query")
         return
 
@@ -487,99 +492,66 @@ async def blackjack_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reply_func("Не удалось проверить ваш баланс. Попробуйте /start.")
         return
 
-    # Инициализация хранилища игр, если его нет
     context.bot_data.setdefault('games', {})
 
-    # --- Обработка существующей игры или завершение старой ---
     if chat_id in context.bot_data['games']:
         game_state = context.bot_data['games'][chat_id]
         old_game_msg_id = game_state.get('message_id')
-
-        # Позволяем начать новую игру только если старая завершена или ожидает ставки
         if game_state.get('state') not in ['game_over', 'waiting_bet']:
             await reply_func("Вы не можете начать новую игру, пока текущая не завершена.")
-            # Опционально: можно отправить текущее состояние игры, если оно есть
             if old_game_msg_id: await show_game_state(context, chat_id, old_game_msg_id)
             return
 
-        # Удаляем старое игровое сообщение (если оно было и не то, с которого пришел callback)
         if old_game_msg_id and old_game_msg_id != message_to_delete_id:
              try:
                  await context.bot.delete_message(chat_id, old_game_msg_id)
                  logger.debug(f"Удалено предыдущее игровое сообщение {old_game_msg_id} в чате {chat_id}")
              except BadRequest as e:
-                 # Игнорируем, если сообщение уже удалено
                  if "message to delete not found" not in str(e).lower():
                      logger.warning(f"Не удалось удалить старое игровое сообщение {old_game_msg_id}: {e}")
              except Exception as e:
                  logger.error(f"Неожиданная ошибка при удалении старого игрового сообщения {old_game_msg_id}: {e}")
-
-        # Удаляем старую игру из памяти в любом случае (если начинаем новую)
         del context.bot_data['games'][chat_id]
         logger.debug(f"Удалено состояние предыдущей игры для чата {chat_id}")
 
-    # --- Проверка возможности сделать ставку ---
     if current_balance <= 0:
-        await reply_func(f"Ваш баланс ({current_balance:.2f} фишек) равен нулю. Используйте /bonus, чтобы получить фишки.")
+        await reply_func(f"Ваш баланс ({current_balance:.2f} фишек) равен нулю. Используйте /bonus.")
         return
 
-    # Предлагаем ставки, доступные по балансу
-    bet_options = [1, 5, 10, 25, 50, 100, 250, 500] # Настраиваемый список ставок
+    bet_options = [1, 5, 10, 25, 50, 100, 250, 500]
     valid_bets = [b for b in bet_options if b <= current_balance]
-
     if not valid_bets:
         min_bet = min(bet_options) if bet_options else 1
-        await reply_func(f"Ваш баланс ({current_balance:.2f} фишек) меньше минимальной ставки ({min_bet} фишек). Используйте /bonus.")
+        await reply_func(f"Ваш баланс ({current_balance:.2f} фишек) меньше мин. ставки ({min_bet}). Используйте /bonus.")
         return
 
-    # --- Создаем кнопки для ставок ---
     buttons = []
     row = []
-    max_buttons_per_row = 4 # Для компактности на мобильных
+    max_buttons_per_row = 4
     for bet in valid_bets:
         row.append(InlineKeyboardButton(f"{bet} F", callback_data=f"bj_bet_{bet}"))
         if len(row) >= max_buttons_per_row:
-            buttons.append(row)
-            row = []
-    if row: # Добавляем последнюю строку, если она не пустая
-        buttons.append(row)
-
+            buttons.append(row); row = []
+    if row: buttons.append(row)
     markup = InlineKeyboardMarkup(buttons)
 
-    # --- Отправляем сообщение с предложением ставки ---
     try:
-        # Если запрос был от кнопки, удаляем старое сообщение и отправляем новое
+        text_to_send = f"Ваш баланс: {current_balance:.2f} фишек. Сделайте вашу ставку:"
         if message_to_delete_id:
-            try:
-                 await context.bot.delete_message(chat_id=chat_id, message_id=message_to_delete_id)
-                 logger.debug(f"Сообщение {message_to_delete_id} с кнопкой 'Новая игра' удалено.")
-            except Exception as e:
-                 logger.warning(f"Не удалось удалить сообщение {message_to_delete_id} с кнопкой 'Новая игра': {e}")
-            # Отправляем новое сообщение с кнопками ставок
-            sent_message = await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"Ваш баланс: {current_balance:.2f} фишек. Сделайте вашу ставку:",
-                reply_markup=markup
-            )
+            try: await context.bot.delete_message(chat_id=chat_id, message_id=message_to_delete_id)
+            except Exception as e: logger.warning(f"Не удалось удалить сообщение {message_to_delete_id} с кнопкой 'Новая игра': {e}")
+            sent_message = await context.bot.send_message(chat_id=chat_id, text=text_to_send, reply_markup=markup)
         else:
-            # Если запрос от /blackjack, используем reply_func
-             sent_message = await reply_func(
-                 f"Ваш баланс: {current_balance:.2f} фишек. Сделайте вашу ставку:",
-                 reply_markup=markup
-             )
+             sent_message = await reply_func(text=text_to_send, reply_markup=markup)
 
-        # Сохраняем состояние ожидания ставки
         context.bot_data['games'][chat_id] = {
-            'player_id': user.id,
-            'state': 'waiting_bet',
-            'message_id': sent_message.message_id # Сохраняем ID сообщения с кнопками ставок
+            'player_id': user.id, 'state': 'waiting_bet', 'message_id': sent_message.message_id
         }
         logger.info(f"Игра инициирована для пользователя {user.id} в чате {chat_id}. Ожидание ставки.")
     except Exception as e:
         logger.error(f"Не удалось отправить сообщение с выбором ставки в чат {chat_id}: {e}", exc_info=True)
-        # Пытаемся уведомить пользователя об ошибке
         try: await reply_func("Произошла ошибка при попытке начать игру. Попробуйте еще раз.")
-        except: pass # Если и это не удалось, просто логируем
+        except: pass
 
 
 async def handle_blackjack_bet(update: Update, context: ContextTypes.DEFAULT_TYPE, bet_amount: int):
@@ -589,293 +561,178 @@ async def handle_blackjack_bet(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = query.message.chat_id
     logger.info(f"Получена ставка {bet_amount} от {user.full_name} ({user.id}) в чате {chat_id}")
 
-    # Проверки состояния игры
     if chat_id not in context.bot_data.get('games', {}):
-        await query.answer("Не найдена активная игра для вас. Начните новую: /blackjack", show_alert=True)
-        return
+        await query.answer("Не найдена активная игра. /blackjack", show_alert=True); return
     game_state = context.bot_data['games'][chat_id]
     if game_state.get('player_id') != user.id:
-        await query.answer("Это не ваша игра.", show_alert=True)
-        return
+        await query.answer("Это не ваша игра.", show_alert=True); return
     if game_state.get('state') != 'waiting_bet':
-        # Игра уже идет или ставка сделана, игнорируем повторное нажатие
-        await query.answer("Ставка уже сделана или игра идет.", show_alert=False) # Не показываем alert
-        return
+        await query.answer("Ставка уже сделана.", show_alert=False); return
 
-    # Проверка баланса
     current_balance = get_balance(user.id)
     if current_balance is None:
-        await query.answer("Ошибка при проверке баланса. Попробуйте снова.", show_alert=True)
-        return
+        await query.answer("Ошибка баланса.", show_alert=True); return
     if bet_amount <= 0:
-        await query.answer("Ставка должна быть положительной.", show_alert=True)
-        return
+        await query.answer("Ставка > 0.", show_alert=True); return
     if bet_amount > current_balance:
-        await query.answer(f"Недостаточно средств. Ваш баланс: {current_balance:.2f} фишек.", show_alert=True)
-        return
+        await query.answer(f"Недостаточно средств ({current_balance:.2f}).", show_alert=True); return
 
-    # Списываем ставку
     new_balance = update_balance(user.id, -bet_amount)
     if new_balance is None:
-        await query.answer("Ошибка при списании ставки. Попробуйте снова.", show_alert=True)
-        return
+        await query.answer("Ошибка списания ставки.", show_alert=True); return
 
-    # --- <<< Создание колоды ТОЛЬКО ЗДЕСЬ >>> ---
-    deck = create_deck(NUM_DECKS) # Создаем и перемешиваем новую колоду
-    player_hand = []
-    dealer_hand = []
-    cards_dealt_count = 0 # Счетчик розданных карт
-
-    # --- Раздача начальных карт ---
+    deck = create_deck(NUM_DECKS)
+    player_hand, dealer_hand = [], []
+    cards_dealt_count = 0
     try:
-        # Используем _draw_card_from_shoe для получения карт
-        card1, _ = _draw_card_from_shoe(deck, cards_dealt_count, NUM_DECKS)
-        player_hand.append(card1); cards_dealt_count += 1
-
-        card2, _ = _draw_card_from_shoe(deck, cards_dealt_count, NUM_DECKS)
-        dealer_hand.append(card2); cards_dealt_count += 1
-
-        card3, _ = _draw_card_from_shoe(deck, cards_dealt_count, NUM_DECKS)
-        player_hand.append(card3); cards_dealt_count += 1
-
-        card4, _ = _draw_card_from_shoe(deck, cards_dealt_count, NUM_DECKS)
-        dealer_hand.append(card4); cards_dealt_count += 1
-
-        # Проверка на None карты после раздачи (если _draw_card_from_shoe вернула None)
-        if None in player_hand or None in dealer_hand:
-             raise ValueError("Ошибка раздачи: получена пустая карта (колода закончилась?).")
-
-    except IndexError: # Если колода закончилась во время начальной раздачи (крайне маловероятно при NUM_DECKS > 1)
-        logger.error(f"Критическая ошибка: колода закончилась во время начальной раздачи для чата {chat_id}.")
-        update_balance(user.id, bet_amount) # Возвращаем ставку
-        await query.edit_message_text("Произошла ошибка с колодой во время раздачи. Ставка возвращена. Попробуйте начать заново /blackjack.")
-        if chat_id in context.bot_data['games']: del context.bot_data['games'][chat_id] # Чистим состояние игры
-        return
+        for _ in range(2): # Раздаем по 2 карты
+            card_p, _ = _draw_card_from_shoe(deck, cards_dealt_count, NUM_DECKS); player_hand.append(card_p); cards_dealt_count += 1
+            card_d, _ = _draw_card_from_shoe(deck, cards_dealt_count, NUM_DECKS); dealer_hand.append(card_d); cards_dealt_count += 1
+        if None in player_hand or None in dealer_hand: raise ValueError("Ошибка раздачи: пустая карта.")
     except Exception as e:
-        logger.error(f"Ошибка во время начальной раздачи карт: {e}", exc_info=True)
-        update_balance(user.id, bet_amount) # Возвращаем ставку
-        await query.edit_message_text(f"Произошла ошибка во время раздачи карт ({e}). Ставка возвращена. Попробуйте начать заново /blackjack.")
-        if chat_id in context.bot_data['games']: del context.bot_data['games'][chat_id] # Чистим состояние игры
+        logger.error(f"Ошибка раздачи: {e}", exc_info=True)
+        update_balance(user.id, bet_amount) # Возврат ставки
+        await query.edit_message_text(f"Ошибка раздачи ({e}). Ставка возвращена. /blackjack")
+        if chat_id in context.bot_data['games']: del context.bot_data['games'][chat_id]
         return
 
-    # --- Проверка на Блекджек сразу после раздачи ---
     player_value = get_hand_value(player_hand)
     dealer_value = get_hand_value(dealer_hand)
-    dealer_up_card_value = get_card_value(dealer_hand[0]) if dealer_hand else 0
-
     player_blackjack = (player_value == 21 and len(player_hand) == 2)
     dealer_blackjack = (dealer_value == 21 and len(dealer_hand) == 2)
 
-    outcome_text = None
-    current_state = 'player_turn' # Изначально ход игрока
-    player_hand_status = 'active' # Статус первой руки игрока
+    outcome_text, current_state, player_hand_status = None, 'player_turn', 'active'
 
     if player_blackjack:
-        player_hand_status = 'blackjack' # Устанавливаем статус БЖ игроку
+        player_hand_status = 'blackjack'
         if dealer_blackjack:
-            # Оба Блекджека - Пуш (возвращаем ставку)
-            outcome_text = f"⚖️ Ничья! У вас и у дилера Блекджек. Ваша ставка {bet_amount} F возвращена."
-            update_balance(user.id, bet_amount) # Возвращаем ставку
-            current_state = 'game_over'
+            outcome_text = f"⚖️ Ничья! Блекджек у обоих. Ставка {bet_amount} F возвращена."
+            update_balance(user.id, bet_amount); current_state = 'game_over'
         else:
-            # Только у игрока Блекджек - Выигрыш (ставка + выигрыш)
-            win_amount = bet_amount * BLACKJACK_PAYOUT
-            total_return = bet_amount + win_amount
-            update_balance(user.id, total_return) # Возвращаем ставку + выигрыш
-            outcome_text = f"✨ БЛЕКДЖЕК! ✨ Вы выиграли {win_amount:.2f} фишек!"
+            win_amount = bet_amount * BLACKJACK_PAYOUT; total_return = bet_amount + win_amount
+            update_balance(user.id, total_return)
+            outcome_text = f"✨ БЛЕКДЖЕК! ✨ Выигрыш {win_amount:.2f} F!"
             current_state = 'game_over'
     elif dealer_blackjack:
-        # Только у дилера Блекджек - Проигрыш (ставка уже списана)
-        outcome_text = f"😥 У дилера Блекджек! Вы проиграли ставку {bet_amount} F."
+        outcome_text = f"😥 У дилера Блекджек! Ставка {bet_amount} F проиграна."
         current_state = 'game_over'
 
-    # --- Обновляем состояние игры ---
     game_state.update({
-        'state': current_state,
-        'deck': deck, # Сохраняем созданную колоду
-        'player_hands': [{ # Список рук игрока (начинаем с одной)
-            'hand': player_hand,
-            'bet': bet_amount,
-            'status': player_hand_status, # 'active', 'blackjack', 'bust', 'stand'
-            'can_double': (not player_blackjack and not dealer_blackjack), # Удвоить можно только если нет БЖ и ход игрока
-            'can_split': False # Возможность сплита определится в show_game_state
-        }],
-        'current_hand_index': 0, # Индекс текущей руки игрока (начинаем с 0)
-        'dealer_hand': dealer_hand,
-        'cards_dealt': cards_dealt_count, # Сохраняем кол-во розданных карт
-        'initial_bet': bet_amount,
-        'split_count': 0, # Счетчик сплитов
-        'outcome_text': outcome_text, # Текст исхода, если игра закончилась сразу
+        'state': current_state, 'deck': deck,
+        'player_hands': [{'hand': player_hand, 'bet': bet_amount, 'status': player_hand_status, 'can_double': (not player_blackjack and not dealer_blackjack), 'can_split': False}],
+        'current_hand_index': 0, 'dealer_hand': dealer_hand, 'cards_dealt': cards_dealt_count,
+        'initial_bet': bet_amount, 'split_count': 0, 'outcome_text': outcome_text,
     })
 
-    # --- Показываем начальное состояние игры ---
-    # Передаем ID сообщения, которое нужно отредактировать (то, где были кнопки ставок)
     await show_game_state(context, chat_id, query.message.message_id)
-
-    # Отвечаем на callback ставки (можно сделать пустым или информативным)
     try: await query.answer(f"Ставка {bet_amount} F принята!")
-    except BadRequest as e: # Игнорируем старые запросы
+    except BadRequest as e:
         if "query is too old" not in str(e).lower(): logger.warning(f"Bet CB Answer Error: {e}")
 
 
 async def show_game_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id_to_edit: int):
     """Отображает текущее состояние игры (руки, ставки, кнопки действий)."""
     if chat_id not in context.bot_data.get('games', {}):
-        logger.warning(f"show_game_state вызван для чата {chat_id}, но игра не найдена.")
+        logger.warning(f"show_game_state: игра {chat_id} не найдена.")
         return
     game_state = context.bot_data['games'][chat_id]
     player_id = game_state.get('player_id')
     if not player_id:
-        logger.error(f"Состояние игры для чата {chat_id} не содержит player_id.")
-        return # Не можем продолжить без ID игрока
+        logger.error(f"show_game_state: нет player_id для {chat_id}.")
+        return
 
-    # Получаем актуальный баланс
     current_balance = get_balance(player_id)
     balance_str = f"{current_balance:.2f}" if current_balance is not None else "Ошибка"
-
     dealer_hand = game_state.get('dealer_hand', [])
     player_hands = game_state.get('player_hands', [])
     current_hand_index = game_state.get('current_hand_index', -1)
     game_status = game_state.get('state', 'unknown')
 
-    # Скрывать вторую карту дилера, если ход игрока и у дилера не блекджек
     hide_dealer_card = (game_status == 'player_turn') and not (get_hand_value(dealer_hand) == 21 and len(dealer_hand) == 2)
 
-    # --- Формируем текст сообщения ---
-    # Используем Markdown V1 (ParseMode.MARKDOWN) для простоты и совместимости
+    # --- Текст сообщения (Markdown V1) ---
     text = f"*Блекджек* | Баланс: {balance_str} F\n"
     total_bet = sum(h.get('bet', 0) for h in player_hands if isinstance(h, dict))
     num_hands = len(player_hands)
-    text += f"Общая ставка: {total_bet} F"
-    if num_hands > 1: text += f" ({num_hands} руки)"
-    text += "\n" + "--------------------\n" # Разделитель
+    text += f"Общая ставка: {total_bet} F{' ({num_hands} руки)'* (num_hands > 1)}\n"
+    text += "--------------------\n"
 
-    # --- Рука дилера ---
+    # Рука дилера
     dealer_value = get_hand_value(dealer_hand)
-    dealer_value_str = "???" # Значение по умолчанию (если скрыто или рука пуста)
-    if dealer_hand: # Проверяем, что рука дилера не пуста
-        if not hide_dealer_card:
-            dealer_value_str = str(dealer_value)
-        elif dealer_hand[0]: # Показываем значение первой карты, если скрываем вторую
-             dealer_value_str = str(get_card_value(dealer_hand[0])) + "+?"
-
-    # <<< ИСПРАВЛЕНИЕ ЗДЕСЬ >>>
-    dealer_hand_str = format_hand(dealer_hand, hide_one=hide_dealer_card) # Используем hide_one=
+    dealer_value_str = "???"
+    if dealer_hand:
+        if not hide_dealer_card: dealer_value_str = str(dealer_value)
+        elif dealer_hand[0]: dealer_value_str = str(get_card_value(dealer_hand[0])) + "+?"
+    dealer_hand_str = format_hand(dealer_hand, hide_one=hide_dealer_card)
     text += f"*Дилер:* {dealer_hand_str} ({dealer_value_str})\n\n"
 
-    # --- Руки игрока ---
+    # Руки игрока
     text += "*Вы:*\n"
-    active_hand_data = None # Данные активной руки для кнопок
+    active_hand_data = None
     for i, hand_data in enumerate(player_hands):
-        if not isinstance(hand_data, dict): continue # Пропускаем невалидные записи рук
-
+        if not isinstance(hand_data, dict): continue
         hand = hand_data.get('hand', [])
         hand_value = get_hand_value(hand)
         hand_status = hand_data.get('status', 'unknown')
         hand_bet = hand_data.get('bet', 0)
-
         is_current_hand = (i == current_hand_index and hand_status == 'active' and game_status == 'player_turn')
-
-        # Индикатор текущей/завершенной руки
-        indicator = "▫️" # По умолчанию
-        if is_current_hand: indicator = "▶️" # Активная рука
-        elif hand_status == 'stand': indicator = "✅" # Стоп
-        elif hand_status == 'bust': indicator = "❌" # Перебор
-        elif hand_status == 'blackjack': indicator = "💰" # Блекджек
-
+        indicator = "▶️" if is_current_hand else ("✅" if hand_status == 'stand' else ("❌" if hand_status == 'bust' else ("💰" if hand_status == 'blackjack' else "▫️")))
         text += f"{indicator} Рука {i+1}: {format_hand(hand)} ({hand_value}) [{hand_bet} F]"
-
-        # Добавляем статус словами для ясности
         if hand_status == 'bust': text += " - *Перебор!*"
         elif hand_status == 'blackjack': text += " - *Блекджек!*"
-        elif hand_status == 'stand' and not is_current_hand: text += " - *Стоп*" # Показываем "Стоп" для неактивных рук
-
+        elif hand_status == 'stand' and not is_current_hand: text += " - *Стоп*"
         text += "\n"
+        if is_current_hand: active_hand_data = hand_data
 
-        if is_current_hand:
-            active_hand_data = hand_data # Сохраняем для кнопок
-
-    # --- Кнопки действий ---
+    # --- Кнопки ---
     keyboard = []
     if active_hand_data and game_status == 'player_turn':
         current_hand = active_hand_data.get('hand', [])
         current_bet = active_hand_data.get('bet', 0)
+        can_double = (active_hand_data.get('can_double', False) and len(current_hand) == 2 and current_balance is not None and current_balance >= current_bet)
+        can_split = (len(current_hand) == 2 and current_hand[0] and current_hand[1] and get_card_value(current_hand[0]) == get_card_value(current_hand[1]) and current_balance is not None and current_balance >= current_bet and game_state.get('split_count', 0) < MAX_SPLITS)
+        active_hand_data['can_split'] = can_split # Сохраняем для handle_action
 
-        # Проверка возможности удвоения (только на первых двух картах)
-        can_double = (active_hand_data.get('can_double', False)
-                      and len(current_hand) == 2
-                      and current_balance is not None and current_balance >= current_bet)
-
-        # Проверка возможности разделения (2 карты, одинаковое ЗНАЧЕНИЕ, хватает баланса, не превышен лимит)
-        can_split = (len(current_hand) == 2
-                     and current_hand[0] and current_hand[1] # Убедимся что карты существуют
-                     and get_card_value(current_hand[0]) == get_card_value(current_hand[1]) # Одинаковые по значению
-                     and current_balance is not None and current_balance >= current_bet
-                     and game_state.get('split_count', 0) < MAX_SPLITS)
-        # Сохраняем возможность сплита в состоянии руки для handle_blackjack_action
-        active_hand_data['can_split'] = can_split
-
-        action_buttons = [
-            InlineKeyboardButton("Еще", callback_data=f"bj_action_hit_{current_hand_index}"),
-            InlineKeyboardButton("Хватит", callback_data=f"bj_action_stand_{current_hand_index}")
-        ]
-        keyboard.append(action_buttons)
-
+        keyboard.append([InlineKeyboardButton("Еще", callback_data=f"bj_action_hit_{current_hand_index}"), InlineKeyboardButton("Хватит", callback_data=f"bj_action_stand_{current_hand_index}")])
         special_buttons = []
         if can_double: special_buttons.append(InlineKeyboardButton("Удвоить", callback_data=f"bj_action_double_{current_hand_index}"))
         if can_split: special_buttons.append(InlineKeyboardButton("Разделить", callback_data=f"bj_action_split_{current_hand_index}"))
         if special_buttons: keyboard.append(special_buttons)
 
     elif game_status == 'game_over':
-        text += "\n*Игра завершена!* 🎉\n"
-        outcome = game_state.get('outcome_text', "Результат не определен.")
-        text += outcome + "\n"
-        final_balance = get_balance(player_id) # Получаем финальный баланс
-        final_balance_str = f"{final_balance:.2f}" if final_balance is not None else "Ошибка"
-        text += f"\nИтоговый баланс: {final_balance_str} фишек."
-        # Кнопка "Новая игра"
+        text += "\n*Игра завершена!* 🎉\n" + game_state.get('outcome_text', "") + "\n"
+        final_balance = get_balance(player_id)
+        text += f"\nИтоговый баланс: {final_balance:.2f} фишек." if final_balance is not None else ""
         keyboard.append([InlineKeyboardButton("🔄 Новая Игра", callback_data="bj_action_new_game")])
 
     elif game_status == 'dealer_turn':
-        text += "\n*Ход дилера...*" # Сообщение о ходе дилера
+        text += "\n*Ход дилера...*"
 
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
-    # --- Редактируем сообщение ---
+    # --- Редактирование сообщения ---
     try:
         await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id_to_edit,
-            text=text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN # Используем Markdown V1
+            chat_id=chat_id, message_id=message_id_to_edit, text=text,
+            reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN
         )
     except BadRequest as e:
-        if "message is not modified" in str(e).lower():
-            pass # Игнорируем, если сообщение не изменилось (часто при быстром нажатии)
-        elif "message to edit not found" in str(e).lower():
-             logger.warning(f"Сообщение {message_id_to_edit} для редактирования не найдено в чате {chat_id}. Возможно, удалено?")
-             # Попробуем отправить новое сообщение, если старое удалено, а игра еще идет
-             if game_status != 'game_over' and chat_id in context.bot_data.get('games', {}):
-                 try:
-                     new_msg = await context.bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-                     # Обновляем ID сообщения в состоянии игры!
-                     context.bot_data['games'][chat_id]['message_id'] = new_msg.message_id
-                     logger.info(f"Отправлено новое сообщение {new_msg.message_id} т.к. старое не найдено.")
-                 except Exception as send_e:
-                     logger.error(f"Не удалось отправить новое сообщение после ошибки редактирования: {send_e}")
-        else:
-            # Другие ошибки BadRequest (например, неправильный Markdown)
-            logger.error(f"Ошибка редактирования сообщения {message_id_to_edit} (BadRequest): {e}")
-            # Попробуем отправить без форматирования
-            try:
-                await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id_to_edit, text=text.replace("*","").replace("_",""), reply_markup=reply_markup)
-                logger.info("Отправлено состояние игры без Markdown из-за ошибки BadRequest.")
-            except Exception as fallback_e:
-                 logger.error(f"Не удалось отправить состояние игры даже без Markdown: {fallback_e}")
-
+        if "message is not modified" not in str(e).lower():
+            if "message to edit not found" in str(e).lower():
+                 logger.warning(f"Сообщение {message_id_to_edit} для ред. не найдено {chat_id}.")
+                 if game_status != 'game_over' and chat_id in context.bot_data.get('games', {}):
+                     try:
+                         new_msg = await context.bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+                         context.bot_data['games'][chat_id]['message_id'] = new_msg.message_id
+                         logger.info(f"Отправлено новое сообщение {new_msg.message_id}.")
+                     except Exception as send_e: logger.error(f"Не удалось отправить новое сообщение: {send_e}")
+            else:
+                 logger.error(f"Ошибка ред. сообщения {message_id_to_edit} (BadRequest): {e}")
+                 try: # Фоллбэк на текст без Markdown
+                     await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id_to_edit, text=text.replace("*","").replace("_","").replace("`",""), reply_markup=reply_markup)
+                 except Exception as fallback_e: logger.error(f"Фоллбэк ред. без Markdown не удался: {fallback_e}")
     except Exception as e:
-        logger.error(f"Неожиданная ошибка при отображении состояния игры для чата {chat_id}: {e}", exc_info=True)
+        logger.error(f"Ошибка show_game_state для {chat_id}: {e}", exc_info=True)
 
 
 async def handle_blackjack_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str, hand_index: int):
@@ -883,203 +740,128 @@ async def handle_blackjack_action(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     user = query.from_user
     chat_id = query.message.chat_id
-    logger.info(f"Действие '{action}' для руки {hand_index} от {user.full_name} ({user.id}) в чате {chat_id}")
+    logger.info(f"Действие '{action}' рука {hand_index} от {user.id} в {chat_id}")
 
-    # --- Проверки состояния игры ---
-    if chat_id not in context.bot_data.get('games', {}): return # Игра не найдена
+    if chat_id not in context.bot_data.get('games', {}): return
     game_state = context.bot_data['games'][chat_id]
-    if game_state.get('player_id') != user.id: return # Не игра этого пользователя
-    if game_state.get('state') != 'player_turn': return # Не ход игрока
+    if game_state.get('player_id') != user.id: return
+    if game_state.get('state') != 'player_turn': return
     player_hands = game_state.get('player_hands', [])
-    if not (0 <= hand_index < len(player_hands)): # Проверка корректности индекса
-        logger.warning(f"Некорректный hand_index {hand_index} в действии '{action}' для чата {chat_id}")
-        return
-    # Проверка, что действие пришло для текущей активной руки
+    if not (0 <= hand_index < len(player_hands)): return
     if hand_index != game_state.get('current_hand_index'):
-        await query.answer("Сейчас ход другой руки.", show_alert=False) # Не алерт, просто уведомление
-        return
+        await query.answer("Сейчас ход другой руки.", show_alert=False); return
 
     hand_data = player_hands[hand_index]
     if not isinstance(hand_data, dict) or hand_data.get('status') != 'active':
-        # Действие для неактивной руки (уже bust, stand или blackjack)
-        await query.answer("Действие для этой руки уже выполнено.", show_alert=False)
-        return
+        await query.answer("Действие для этой руки уже выполнено.", show_alert=False); return
 
-    # --- Получение данных для действия ---
     current_hand = hand_data.get('hand', [])
-    deck = game_state.get('deck', []) # Берем текущую колоду из состояния
+    deck = game_state.get('deck', [])
     current_balance = get_balance(user.id)
     current_bet = hand_data.get('bet', 0)
-    cards_dealt_count = game_state.get('cards_dealt', 0) # Получаем текущий счетчик карт
+    cards_dealt_count = game_state.get('cards_dealt', 0)
 
-    # Проверка баланса перед действиями, требующими ставки
     if action in ['double', 'split'] and current_balance is None:
-        await query.answer("Ошибка получения баланса.", show_alert=True)
-        return
+        await query.answer("Ошибка получения баланса.", show_alert=True); return
 
-    # --- Обработка действий ---
-    should_update_state = False # Флаг, нужно ли перерисовать сообщение
+    should_update_state = False
     try:
         if action == 'hit':
             card, _ = _draw_card_from_shoe(deck, cards_dealt_count, NUM_DECKS)
             if card:
-                current_hand.append(card)
-                game_state['cards_dealt'] += 1 # Обновляем счетчик в состоянии игры
-                hand_data['can_double'] = False # Нельзя удваивать/делить после хита
-                hand_data['can_split'] = False
+                current_hand.append(card); game_state['cards_dealt'] += 1
+                hand_data['can_double'] = False; hand_data['can_split'] = False
                 new_value = get_hand_value(current_hand)
-                await query.answer(f"Ваша карта: {card[0]}{card[1]}") # Краткий ответ о карте
-
+                await query.answer(f"Ваша карта: {card[0]}{card[1]}")
                 if new_value > 21:
-                    hand_data['status'] = 'bust'
-                    # await query.answer("Перебор!") # Заменено на лог ниже
-                    logger.info(f"Рука {hand_index} игрока {user.id} - Перебор ({new_value})")
-                    await next_player_action_or_dealer(context, chat_id) # Переход хода
+                    hand_data['status'] = 'bust'; logger.info(f"Рука {hand_index} игрока {user.id} - Перебор ({new_value})")
+                    await next_player_action_or_dealer(context, chat_id)
                 elif new_value == 21:
-                    hand_data['status'] = 'stand' # Авто-стоп на 21
-                    logger.info(f"Рука {hand_index} игрока {user.id} - 21 ({new_value}), авто-стоп.")
-                    await next_player_action_or_dealer(context, chat_id) # Переход хода
-                else:
-                    # Игра продолжается на этой руке, просто обновляем состояние
-                    should_update_state = True
+                    hand_data['status'] = 'stand'; logger.info(f"Рука {hand_index} игрока {user.id} - 21, стоп.")
+                    await next_player_action_or_dealer(context, chat_id)
+                else: should_update_state = True
             else:
-                # Карта не получена (колода закончилась?) - считаем как Stand
-                logger.warning(f"Hit не удался для user {user.id} в чате {chat_id} - колода пуста?")
+                logger.warning(f"Hit не удался для {user.id} в {chat_id} - колода пуста?")
                 hand_data['status'] = 'stand'
-                await query.answer("Не удалось взять карту (колода?). Рука остается.", show_alert=True)
-                await next_player_action_or_dealer(context, chat_id) # Переход хода
+                await query.answer("Не удалось взять карту (колода?).", show_alert=True)
+                await next_player_action_or_dealer(context, chat_id)
 
         elif action == 'stand':
             hand_data['status'] = 'stand'
-            await query.answer("Стоп.") # Краткий ответ
-            await next_player_action_or_dealer(context, chat_id) # Переход хода
+            await query.answer("Стоп.")
+            await next_player_action_or_dealer(context, chat_id)
 
         elif action == 'double':
-            # Повторная проверка условий (на всякий случай + баланс)
-            can_double = (hand_data.get('can_double', False)
-                          and len(current_hand) == 2
-                          and current_balance is not None and current_balance >= current_bet)
+            can_double = (hand_data.get('can_double', False) and len(current_hand) == 2 and current_balance is not None and current_balance >= current_bet)
             if can_double:
-                new_balance = update_balance(user.id, -current_bet) # Списываем доп. ставку
+                new_balance = update_balance(user.id, -current_bet)
                 if new_balance is not None:
-                    hand_data['bet'] += current_bet
-                    hand_data['can_double'] = False # Удвоить можно только раз
-                    hand_data['can_split'] = False
+                    hand_data['bet'] += current_bet; hand_data['can_double'] = False; hand_data['can_split'] = False
                     card, _ = _draw_card_from_shoe(deck, game_state['cards_dealt'], NUM_DECKS)
                     if card:
-                        current_hand.append(card)
-                        game_state['cards_dealt'] += 1
+                        current_hand.append(card); game_state['cards_dealt'] += 1
                         new_value = get_hand_value(current_hand)
-                        hand_data['status'] = 'bust' if new_value > 21 else 'stand' # После удвоения ход завершается
-                        await query.answer(f"Удвоено! Карта: {card[0]}{card[1]}. Итог: {new_value}{' (Перебор!)' * (new_value > 21)}")
-                        await next_player_action_or_dealer(context, chat_id) # Переход хода
+                        hand_data['status'] = 'bust' if new_value > 21 else 'stand'
+                        await query.answer(f"Удвоено! Карта: {card[0]}{card[1]}. Итог: {new_value}{' (Перебор!)'*(new_value > 21)}")
+                        await next_player_action_or_dealer(context, chat_id)
                     else:
-                        # Карта не получена - считаем как Stand без доп. карты
-                        logger.warning(f"Double не удался для user {user.id} в чате {chat_id} - колода пуста?")
+                        logger.warning(f"Double не удался для {user.id} в {chat_id} - колода пуста?")
                         hand_data['status'] = 'stand'
-                        await query.answer("Удвоено! Не удалось взять карту (колода?). Рука остается.", show_alert=True)
-                        await next_player_action_or_dealer(context, chat_id) # Переход хода
-                else:
-                    await query.answer("Ошибка обновления баланса при удвоении.", show_alert=True)
-            else:
-                 # Сообщаем, почему нельзя удвоить
-                 reason = ""
-                 if not hand_data.get('can_double', False): reason = "действие недоступно"
-                 elif len(current_hand) != 2: reason = "не 2 карты"
-                 elif current_balance is None or current_balance < current_bet: reason = "недостаточно средств"
-                 await query.answer(f"Удвоение невозможно ({reason}).", show_alert=True)
+                        await query.answer("Удвоено! Не удалось взять карту (колода?).", show_alert=True)
+                        await next_player_action_or_dealer(context, chat_id)
+                else: await query.answer("Ошибка баланса при удвоении.", show_alert=True)
+            else: await query.answer("Удвоение невозможно.", show_alert=True)
 
         elif action == 'split':
-             # Используем флаг 'can_split', установленный в show_game_state
              can_split = hand_data.get('can_split', False)
              if can_split:
-                 # Убедимся еще раз в наличии баланса
                  if current_balance is None or current_balance < current_bet:
-                      await query.answer("Недостаточно средств для разделения.", show_alert=True)
-                      return # Выход, если денег нет
-
-                 new_balance = update_balance(user.id, -current_bet) # Списываем ставку для новой руки
+                      await query.answer("Недостаточно средств.", show_alert=True); return
+                 new_balance = update_balance(user.id, -current_bet)
                  if new_balance is not None:
                      game_state['split_count'] += 1
-                     # Создаем новую руку
-                     card_to_move = current_hand.pop() # Забираем вторую карту из текущей руки
-                     new_hand_data = {
-                         'hand': [card_to_move], # Новая рука начинается с этой карты
-                         'bet': current_bet,
-                         'status': 'active',
-                         'can_double': False, # Будет установлено после раздачи карт
-                         'can_split': False
-                     }
-                     # Вставляем новую руку сразу после текущей (индекс + 1)
+                     card_to_move = current_hand.pop()
+                     new_hand_data = {'hand': [card_to_move], 'bet': current_bet, 'status': 'active', 'can_double': False, 'can_split': False}
                      player_hands.insert(hand_index + 1, new_hand_data)
-                     logger.info(f"Рука {hand_index} разделена игроком {user.id}. Новая рука на индексе {hand_index + 1}.")
+                     logger.info(f"Рука {hand_index} разделена игроком {user.id}. Новая рука {hand_index + 1}.")
 
-                     # Раздаем по одной карте в КАЖДУЮ из разделенных рук
                      card1, _ = _draw_card_from_shoe(deck, game_state['cards_dealt'], NUM_DECKS)
-                     if card1:
-                         current_hand.append(card1); game_state['cards_dealt'] += 1
-                         logger.debug(f"Карта {card1[0]}{card1[1]} добавлена в руку {hand_index} после сплита.")
-                     else: logger.warning(f"Не удалось взять карту 1 после сплита в {chat_id}")
+                     if card1: current_hand.append(card1); game_state['cards_dealt'] += 1
+                     else: logger.warning(f"Сплит карта 1 не взята {chat_id}")
 
                      card2, _ = _draw_card_from_shoe(deck, game_state['cards_dealt'], NUM_DECKS)
-                     if card2:
-                         new_hand_data['hand'].append(card2); game_state['cards_dealt'] += 1
-                         logger.debug(f"Карта {card2[0]}{card2[1]} добавлена в новую руку {hand_index + 1} после сплита.")
-                     else: logger.warning(f"Не удалось взять карту 2 после сплита в {chat_id}")
+                     if card2: new_hand_data['hand'].append(card2); game_state['cards_dealt'] += 1
+                     else: logger.warning(f"Сплит карта 2 не взята {chat_id}")
 
-                     # Особое правило для сплита тузов: игра на каждой руке сразу завершается (stand)
-                     is_ace_split = get_card_value(current_hand[0]) == 11 # Проверяем по первой карте (вторая была такая же)
-
+                     is_ace_split = get_card_value(current_hand[0]) == 11
                      if is_ace_split:
-                         hand_data['status'] = 'stand'
-                         new_hand_data['status'] = 'stand'
-                         hand_data['can_double'] = False # Удваивать тузы после сплита нельзя
-                         new_hand_data['can_double'] = False
-                         await query.answer("Тузы разделены. Раздано по одной карте. Ход завершен.")
-                         await next_player_action_or_dealer(context, chat_id) # Сразу переход хода
+                         hand_data['status'] = 'stand'; new_hand_data['status'] = 'stand'
+                         hand_data['can_double'] = False; new_hand_data['can_double'] = False
+                         await query.answer("Тузы разделены. Ход завершен.")
+                         await next_player_action_or_dealer(context, chat_id)
                      else:
-                         # Обновляем флаги can_double/can_split для обеих рук (если не тузы)
-                         # Удваивать можно, если после раздачи 2 карты
                          hand_data['can_double'] = (len(current_hand) == 2)
                          new_hand_data['can_double'] = (len(new_hand_data['hand']) == 2)
-                         # Повторный сплит возможен, если опять одинаковые карты и лимит не достигнут
                          hand_data['can_split'] = (len(current_hand) == 2 and current_hand[0] and current_hand[1] and get_card_value(current_hand[0]) == get_card_value(current_hand[1]) and game_state['split_count'] < MAX_SPLITS)
                          new_hand_data['can_split'] = (len(new_hand_data['hand']) == 2 and new_hand_data['hand'][0] and new_hand_data['hand'][1] and get_card_value(new_hand_data['hand'][0]) == get_card_value(new_hand_data['hand'][1]) and game_state['split_count'] < MAX_SPLITS)
-
-                         # Авто-стоп, если на какой-то руке сразу 21 (не БЖ)
                          if get_hand_value(current_hand) == 21: hand_data['status'] = 'stand'
                          if get_hand_value(new_hand_data['hand']) == 21: new_hand_data['status'] = 'stand'
-
                          await query.answer("Рука разделена!")
-                         # Остаемся на текущей руке (hand_index), просто обновляем состояние
                          should_update_state = True
+                 else: await query.answer("Ошибка баланса при разделении.", show_alert=True)
+             else: await query.answer("Разделение невозможно.", show_alert=True)
 
-                 else:
-                     await query.answer("Ошибка обновления баланса при разделении.", show_alert=True)
-             else:
-                  # Сообщаем, почему нельзя разделить
-                  reason = ""
-                  if len(current_hand) != 2: reason = "не 2 карты"
-                  elif not (current_hand[0] and current_hand[1] and get_card_value(current_hand[0]) == get_card_value(current_hand[1])): reason = "карты не одинаковы по значению"
-                  elif current_balance is None or current_balance < current_bet: reason = "недостаточно средств"
-                  elif game_state.get('split_count', 0) >= MAX_SPLITS: reason = f"макс. {MAX_SPLITS} сплита"
-                  else: reason = "неизвестная причина" # На всякий случай
-                  await query.answer(f"Разделение невозможно ({reason}).", show_alert=True)
-
-        # Обновляем сообщение игры, если нужно (после hit или split без завершения хода)
         if should_update_state:
             await show_game_state(context, chat_id, query.message.message_id)
 
     except IndexError:
-         # Ошибка возникает, если _draw_card_from_shoe не может взять карту (колода пуста)
-         logger.warning(f"Действие '{action}' не удалось для user {user.id} в chat {chat_id} - IndexError (колода закончилась?).")
-         hand_data['status'] = 'stand' # Завершаем ход для этой руки как "стоп"
-         await query.answer(f"Не удалось выполнить '{action}', так как в колоде закончились карты! Ваша рука остается.", show_alert=True)
-         await next_player_action_or_dealer(context, chat_id) # Передаем ход дальше
-
+         logger.warning(f"Действие '{action}' не удалось {user.id} в {chat_id} - IndexError (колода?).")
+         hand_data['status'] = 'stand'
+         await query.answer(f"Не удалось '{action}', колода пуста! Рука остается.", show_alert=True)
+         await next_player_action_or_dealer(context, chat_id)
     except Exception as e:
-         logger.error(f"Ошибка при обработке действия '{action}' для user {user.id} в chat {chat_id}: {e}", exc_info=True)
-         try: await query.answer("Произошла ошибка при обработке вашего хода.", show_alert=True)
+         logger.error(f"Ошибка handle_action '{action}' {user.id} {chat_id}: {e}", exc_info=True)
+         try: await query.answer("Ошибка обработки хода.", show_alert=True)
          except: pass
 
 
@@ -1087,120 +869,75 @@ async def next_player_action_or_dealer(context: ContextTypes.DEFAULT_TYPE, chat_
     """Переключает на следующую активную руку игрока или начинает ход дилера."""
     if chat_id not in context.bot_data.get('games', {}): return
     game_state = context.bot_data['games'][chat_id]
-    # Эта функция вызывается только из player_turn, но проверим на всякий случай
-    if game_state.get('state') != 'player_turn':
-        logger.warning(f"next_player_action_or_dealer вызван в состоянии {game_state.get('state')} для чата {chat_id}")
-        # Если ход дилера уже начался, ничего не делаем
-        if game_state.get('state') == 'dealer_turn': return
-        # Если игра окончена, тоже выходим
-        if game_state.get('state') == 'game_over': return
-        # Иначе пробуем перейти к дилеру (нештатная ситуация)
-        game_state['state'] = 'dealer_turn'
+    if game_state.get('state') != 'player_turn': return
 
     player_hands = game_state.get('player_hands', [])
     current_index = game_state.get('current_hand_index', -1)
-
-    # Ищем следующую руку со статусом 'active'
     next_active_index = -1
     for i in range(current_index + 1, len(player_hands)):
         if isinstance(player_hands[i], dict) and player_hands[i].get('status') == 'active':
-            next_active_index = i
-            break
+            next_active_index = i; break
 
     if next_active_index != -1:
-        # Нашли следующую активную руку
         game_state['current_hand_index'] = next_active_index
-        logger.info(f"Переход к руке {next_active_index} для игрока {game_state.get('player_id')} в чате {chat_id}")
+        logger.info(f"Переход к руке {next_active_index} для {game_state.get('player_id')} в {chat_id}")
         await show_game_state(context, chat_id, game_state.get('message_id'))
     else:
-        # Активных рук игрока больше нет, переходим к ходу дилера
         game_state['state'] = 'dealer_turn'
-        logger.info(f"Игрок {game_state.get('player_id')} завершил ход в чате {chat_id}. Начинается ход дилера.")
-        # Обновляем сообщение, чтобы показать "Ход дилера..."
+        logger.info(f"Игрок {game_state.get('player_id')} завершил ход в {chat_id}. Ход дилера.")
         await show_game_state(context, chat_id, game_state.get('message_id'))
-        # Запускаем ход дилера с небольшой задержкой через job_queue
         context.job_queue.run_once(
-            dealer_turn_job,
-            when=DEALER_TURN_DELAY, # Задержка в секундах
-            chat_id=chat_id,
-            data=chat_id, # Передаем chat_id в job
-            name=f"dealer_turn_{chat_id}" # Уникальное имя для джоба
+            dealer_turn_job, when=DEALER_TURN_DELAY, chat_id=chat_id,
+            data=chat_id, name=f"dealer_turn_{chat_id}"
         )
 
 
 async def dealer_turn_job(context: ContextTypes.DEFAULT_TYPE):
-    """Выполняет ход дилера (берет карты до 17 или Soft 17) - запускается через Job Queue."""
-    chat_id = context.job.data # Получаем chat_id из данных джоба
-    logger.info(f"Запущен job dealer_turn для чата {chat_id}")
+    """Выполняет ход дилера (берет карты до 17 или Soft 17)."""
+    chat_id = context.job.data
+    logger.info(f"Запущен job dealer_turn для {chat_id}")
 
     if chat_id not in context.bot_data.get('games', {}):
-        logger.warning(f"Job хода дилера выполнен для чата {chat_id}, но игра не найдена.")
-        return
+        logger.warning(f"Job хода дилера {chat_id}: игра не найдена."); return
     game_state = context.bot_data['games'][chat_id]
-    # Важно: проверяем, что состояние все еще 'dealer_turn' (могло измениться)
     if game_state.get('state') != 'dealer_turn':
-        logger.warning(f"Job хода дилера выполнен для чата {chat_id}, но состояние уже не 'dealer_turn' ({game_state.get('state')}). Прерывание.")
-        return
+        logger.warning(f"Job хода дилера {chat_id}: состояние {game_state.get('state')} != 'dealer_turn'."); return
 
     deck = game_state.get('deck', [])
     dealer_hand = game_state.get('dealer_hand', [])
     player_hands = game_state.get('player_hands', [])
     cards_dealt_count = game_state.get('cards_dealt', 0)
 
-    # Проверяем, есть ли смысл дилеру ходить
-    # Если все руки игрока bust или blackjack (уже оплачен), дилер не ходит
-    player_can_win_or_push = any(
-        isinstance(h, dict) and h.get('status') not in ['bust', 'blackjack']
-        for h in player_hands
-    )
-
+    player_can_win_or_push = any(isinstance(h, dict) and h.get('status') not in ['bust', 'blackjack'] for h in player_hands)
     dealer_value_initial = get_hand_value(dealer_hand)
     dealer_had_blackjack_on_deal = (dealer_value_initial == 21 and len(dealer_hand) == 2)
 
     if not player_can_win_or_push and not dealer_had_blackjack_on_deal:
-        logger.info(f"Ход дилера пропущен в чате {chat_id}, т.к. все руки игрока проиграли или получили БЖ.")
-        # Дилер не ходит, но результат все равно определяем (дилер вскрывает карты)
-        await determine_outcome(context, chat_id, dealer_had_blackjack_on_deal)
-        return
+        logger.info(f"Ход дилера пропущен в {chat_id} (все руки игрока проиграли/БЖ).")
+        await determine_outcome(context, chat_id, dealer_had_blackjack_on_deal); return
 
-    # --- Дилер берет карты ---
     dealer_hit_count = 0
     while True:
         dealer_value = get_hand_value(dealer_hand)
-        # Проверка на мягкую руку (туз считается как 11)
         ace_count = sum(1 for card in dealer_hand if card and card[0] == 'A')
-        is_soft = ace_count > 0 and (dealer_value - ace_count * 11) < 11 # True если есть туз(ы), считаемый(е) как 11
-
-        # Правило взятия карты дилером
+        is_soft = ace_count > 0 and (dealer_value - ace_count * 11) < 11
         should_hit = (dealer_value < 17) or (dealer_value == 17 and is_soft and DEALER_HITS_SOFT_17)
-
         if not should_hit:
-            logger.info(f"Дилер останавливается на {dealer_value} ({format_hand(dealer_hand)}) в чате {chat_id}.")
-            break # Дилер останавливается
+            logger.info(f"Дилер стоп на {dealer_value} ({format_hand(dealer_hand)}) в {chat_id}."); break
 
         dealer_hit_count += 1
-        logger.debug(f"Дилер берет карту {dealer_hit_count} (текущее значение: {dealer_value}) в чате {chat_id}")
-
-        # Берем карту
+        logger.debug(f"Дилер hit {dealer_hit_count} ({dealer_value}) в {chat_id}")
         try:
             card, _ = _draw_card_from_shoe(deck, cards_dealt_count, NUM_DECKS)
             if card:
-                dealer_hand.append(card)
-                game_state['cards_dealt'] += 1
-                cards_dealt_count = game_state['cards_dealt'] # Обновляем локальный счетчик
-                logger.debug(f"Дилер взял карту {card[0]}{card[1]}. Новая рука: {format_hand(dealer_hand)}")
-                # Опционально: обновить сообщение после каждой карты дилера для "анимации"
+                dealer_hand.append(card); game_state['cards_dealt'] += 1; cards_dealt_count = game_state['cards_dealt']
+                logger.debug(f"Дилер взял {card[0]}{card[1]}. Рука: {format_hand(dealer_hand)}")
+                # Опциональная задержка/обновление для анимации
                 # await show_game_state(context, chat_id, game_state.get('message_id'))
-                # await asyncio.sleep(DEALER_TURN_DELAY * 1.5) # Доп. задержка между картами дилера
-            else:
-                # Карта не получена - колода закончилась
-                logger.warning(f"Ход дилера прерван в чате {chat_id} - не удалось взять карту (колода пуста?).")
-                break # Прерываем цикл, если карта не может быть взята
-        except IndexError:
-            logger.warning(f"Ход дилера прерван в чате {chat_id} - IndexError (колода закончилась?).")
-            break # Колода закончилась
+                # await asyncio.sleep(DEALER_TURN_DELAY * 1.5)
+            else: logger.warning(f"Ход дилера прерван {chat_id} - карта не взята."); break
+        except IndexError: logger.warning(f"Ход дилера прерван {chat_id} - IndexError."); break
 
-    # --- Ход дилера завершен, определяем результат ---
     await determine_outcome(context, chat_id, dealer_had_blackjack_on_deal)
 
 
@@ -1208,136 +945,65 @@ async def determine_outcome(context: ContextTypes.DEFAULT_TYPE, chat_id: int, de
     """Определяет результат игры для каждой руки игрока и обновляет баланс."""
     if chat_id not in context.bot_data.get('games', {}): return
     game_state = context.bot_data['games'][chat_id]
-    logger.info(f"Определение исхода игры в чате {chat_id}")
+    logger.info(f"Определение исхода игры в {chat_id}")
 
-    # Предотвращаем повторное определение исхода, если он уже есть
-    # Но позволяем показать финальное сообщение еще раз
     if game_state.get('state') == 'game_over' and 'outcome_determined' in game_state:
-        logger.debug(f"Исход для чата {chat_id} уже определен, просто показываем состояние.")
-        await show_game_state(context, chat_id, game_state.get('message_id'))
-        return
+        logger.debug(f"Исход для {chat_id} уже определен."); await show_game_state(context, chat_id, game_state.get('message_id')); return
 
-    player_id = game_state.get('player_id')
-    player_hands = game_state.get('player_hands', [])
-    dealer_hand = game_state.get('dealer_hand', [])
-    if not player_id:
-        logger.error(f"Не найден player_id при определении исхода в чате {chat_id}")
-        return # Не можем продолжить без ID игрока
+    player_id = game_state.get('player_id'); player_hands = game_state.get('player_hands', []); dealer_hand = game_state.get('dealer_hand', [])
+    if not player_id: logger.error(f"Нет player_id при определении исхода {chat_id}"); return
 
-    dealer_value = get_hand_value(dealer_hand)
-    dealer_is_bust = dealer_value > 21
-    dealer_hand_final_str = format_hand(dealer_hand) # Полная рука дилера для логов/сообщений
+    dealer_value = get_hand_value(dealer_hand); dealer_is_bust = dealer_value > 21
+    dealer_hand_final_str = format_hand(dealer_hand)
+    logger.info(f"Дилер {chat_id}: {dealer_hand_final_str} ({dealer_value}), Перебор: {dealer_is_bust}, Был БЖ: {dealer_had_blackjack_on_deal}")
 
-    logger.info(f"Рука дилера: {dealer_hand_final_str} ({dealer_value}), Перебор: {dealer_is_bust}, Был БЖ: {dealer_had_blackjack_on_deal}")
-
-    outcomes = [] # Текстовые результаты для каждой руки
-    total_winnings = 0 # Сумма, которую нужно ВЕРНУТЬ игроку (включая ставки)
-    total_bet = 0 # Общая сумма ставок во всех руках
+    outcomes = []; total_winnings = 0; total_bet = 0
 
     for i, hand_data in enumerate(player_hands):
         if not isinstance(hand_data, dict): continue
+        hand = hand_data.get('hand', []); bet = hand_data.get('bet', 0); status = hand_data.get('status'); player_value = get_hand_value(hand)
+        player_hand_str = format_hand(hand); player_had_blackjack_this_hand = (status == 'blackjack')
+        total_bet += bet; payout_multiplier = 0; outcome_str = ""; hand_prefix = f"Рука {i+1}: " if len(player_hands) > 1 else ""
+        logger.debug(f"Рука {i}: Ст={status}, Карты={player_hand_str}, Очки={player_value}, Ставка={bet}")
 
-        hand = hand_data.get('hand', [])
-        bet = hand_data.get('bet', 0)
-        status = hand_data.get('status') # Статус руки на момент завершения хода игрока
-        player_value = get_hand_value(hand)
-        player_hand_str = format_hand(hand)
-        player_had_blackjack_this_hand = (status == 'blackjack') # Был ли БЖ на этой руке
-
-        total_bet += bet # Суммируем все ставки
-        payout_multiplier = 0 # 0=проигрыш, 1=пуш, 2=выигрыш 1:1, (1 + BJ_PAYOUT)=БЖ
-        outcome_str = ""
-        hand_prefix = f"Рука {i+1}: " if len(player_hands) > 1 else "" # Префикс для мульти-рук
-
-        logger.debug(f"Обработка руки {i}: Статус={status}, Карты={player_hand_str}, Очки={player_value}, Ставка={bet}")
-
-        if status == 'bust':
-            payout_multiplier = 0 # Ставка проиграна
-            outcome_str = f"{hand_prefix}Перебор ({player_value}). Ставка {bet} F проиграна."
+        if status == 'bust': payout_multiplier = 0; outcome_str = f"{hand_prefix}Перебор ({player_value}). Ставка {bet} F проиграна."
         elif player_had_blackjack_this_hand:
-             # Этот случай должен был обработаться при раздаче, но проверим
-             if dealer_had_blackjack_on_deal: # Если у дилера тоже БЖ
-                 payout_multiplier = 1 # Пуш
-                 outcome_str = f"{hand_prefix}Блекджек! Но у дилера тоже. Ничья, ставка {bet} F возвращена."
-             else: # Только у игрока БЖ
-                 payout_multiplier = 1 + BLACKJACK_PAYOUT
-                 win_amount = bet * BLACKJACK_PAYOUT
-                 outcome_str = f"{hand_prefix}Блекджек! Выигрыш {win_amount:.2f} F."
-        elif dealer_had_blackjack_on_deal: # У дилера БЖ, игрок проиграл (т.к. у игрока не БЖ)
-            payout_multiplier = 0
-            outcome_str = f"{hand_prefix}У дилера Блекджек. Ставка {bet} F проиграна."
-        elif dealer_is_bust:
-             # У дилера перебор, игрок выигрывает (если у игрока не перебор)
-            payout_multiplier = 2 # Возврат ставки + выигрыш 1:1
-            outcome_str = f"{hand_prefix}У дилера перебор ({dealer_value})! Выигрыш {bet} F."
-        # Сравниваем очки, если ни у кого нет перебора или БЖ
-        elif player_value > dealer_value:
-            payout_multiplier = 2 # Выигрыш 1:1
-            outcome_str = f"{hand_prefix}{player_value} > {dealer_value}. Выигрыш {bet} F."
-        elif player_value == dealer_value:
-            payout_multiplier = 1 # Пуш, возврат ставки
-            outcome_str = f"{hand_prefix}{player_value} = {dealer_value}. Ничья, ставка {bet} F возвращена."
-        else: # player_value < dealer_value
-            payout_multiplier = 0 # Проигрыш
-            outcome_str = f"{hand_prefix}{player_value} < {dealer_value}. Ставка {bet} F проиграна."
+             if dealer_had_blackjack_on_deal: payout_multiplier = 1; outcome_str = f"{hand_prefix}Блекджек! Но у дилера тоже. Ничья, ставка {bet} F возвращена."
+             else: payout_multiplier = 1 + BLACKJACK_PAYOUT; win_amount = bet * BLACKJACK_PAYOUT; outcome_str = f"{hand_prefix}Блекджек! Выигрыш {win_amount:.2f} F."
+        elif dealer_had_blackjack_on_deal: payout_multiplier = 0; outcome_str = f"{hand_prefix}У дилера Блекджек. Ставка {bet} F проиграна."
+        elif dealer_is_bust: payout_multiplier = 2; outcome_str = f"{hand_prefix}У дилера перебор ({dealer_value})! Выигрыш {bet} F."
+        elif player_value > dealer_value: payout_multiplier = 2; outcome_str = f"{hand_prefix}{player_value} > {dealer_value}. Выигрыш {bet} F."
+        elif player_value == dealer_value: payout_multiplier = 1; outcome_str = f"{hand_prefix}{player_value} = {dealer_value}. Ничья, ставка {bet} F возвращена."
+        else: payout_multiplier = 0; outcome_str = f"{hand_prefix}{player_value} < {dealer_value}. Ставка {bet} F проиграна."
 
-        outcomes.append(outcome_str)
-        total_winnings += bet * payout_multiplier # Суммируем возврат/выигрыш
-        logger.debug(f"Результат руки {i}: {outcome_str}, Множитель={payout_multiplier}, Выигрыш/Возврат={bet * payout_multiplier}")
+        outcomes.append(outcome_str); total_winnings += bet * payout_multiplier
+        logger.debug(f"Результат руки {i}: {outcome_str}, Множитель={payout_multiplier}")
 
-    # --- Обновляем баланс игрока ---
-    net_change = total_winnings - total_bet # Чистое изменение баланса
-    logger.info(f"Общий итог для {player_id}: Ставки={total_bet}, Выигрыш/Возврат={total_winnings}, Изменение={net_change:+.2f}")
-
-    if total_winnings > 0: # Обновляем баланс только если есть возврат/выигрыш
+    net_change = total_winnings - total_bet
+    logger.info(f"Итог {player_id}: Ставки={total_bet}, Выигрыш/Возврат={total_winnings}, Изменение={net_change:+.2f}")
+    if total_winnings > 0:
         final_balance = update_balance(player_id, total_winnings)
         if final_balance is None:
-             logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: не удалось обновить баланс для user {player_id} после игры в chat {chat_id}.")
-             # Пытаемся сообщить об ошибке, но не перезаписываем исход игры
-             outcomes.append("\n**ОШИБКА:** Не удалось начислить выигрыш! Свяжитесь с администратором.")
-             net_change = 0 # Считаем, что изменения не было, раз не записали
-    # Если выигрыша не было (total_winnings == 0), баланс не обновляем (ставка уже списана)
+             logger.error(f"КРИТ. ОШИБКА: update_balance не удался для {player_id} в {chat_id}.")
+             outcomes.append("\n*ОШИБКА:* Не удалось начислить выигрыш!")
+             net_change = 0 # Считаем, что не изменился
 
-    # --- Сохраняем результат в состоянии игры ---
-    game_state['state'] = 'game_over'
-    game_state['outcome_text'] = "\n".join(outcomes) + f"\n\n*Общий итог раунда: {net_change:+.2f} F*" # Форматируем с + или -
-    game_state['outcome_determined'] = True # Флаг, что исход определен
-
-    # --- Показываем финальное сообщение ---
+    game_state['state'] = 'game_over'; game_state['outcome_text'] = "\n".join(outcomes) + f"\n\n*Общий итог раунда: {net_change:+.2f} F*"
+    game_state['outcome_determined'] = True
     await show_game_state(context, chat_id, game_state.get('message_id'))
-
-    # Опционально: очистка состояния игры после показа результата
-    # if chat_id in context.bot_data['games']:
-    #     # Можно добавить задержку перед удалением, чтобы пользователь успел увидеть результат
-    #     # await asyncio.sleep(60) # Например, 1 минута
-    #     # del context.bot_data['games'][chat_id]
-    #     # logger.info(f"Состояние игры для чата {chat_id} очищено после определения исхода.")
-    #     pass
 
 
 # --- <<< Internal Dealing Logic >>> ---
 
 def _draw_card_from_shoe(deck: list, cards_dealt: int, num_decks: int):
-    """
-    Просто берет случайную карту из оставшейся колоды и удаляет ее.
-    Возвращает (карта, 0) или (None, 0), если колода пуста.
-    Второй элемент (0) - заглушка для совместимости старой сигнатуры.
-    """
-    if not deck: # Проверка на пустую колоду
-        logger.warning("_draw_card_from_shoe: Попытка взять карту из пустой колоды.")
-        return None, 0
+    """Берет случайную карту из колоды и удаляет ее."""
+    if not deck: logger.warning("_draw_card: пустая колода."); return None, 0
     try:
-        # Выбираем случайную карту из оставшихся
         chosen_card_index = random.randrange(len(deck))
-        chosen_card = deck.pop(chosen_card_index) # Удаляем карту по индексу (эффективнее для больших списков)
-        # logger.debug(f"Взята карта: {chosen_card}. Карт осталось: {len(deck)}")
+        chosen_card = deck.pop(chosen_card_index)
         return chosen_card, 0
-    except IndexError: # На случай, если колода опустела между проверкой и pop
-        logger.warning("_draw_card_from_shoe: IndexError при взятии карты (колода опустела?).")
-        return None, 0
-    except Exception as e:
-        logger.error(f"Неожиданная ошибка в _draw_card_from_shoe: {e}", exc_info=True)
-        return None, 0
+    except IndexError: logger.warning("_draw_card: IndexError."); return None, 0
+    except Exception as e: logger.error(f"Ошибка _draw_card: {e}", exc_info=True); return None, 0
 
 # <<< --- End of Internal Dealing Logic --- >>>
 
@@ -1345,131 +1011,89 @@ def _draw_card_from_shoe(deck: list, cards_dealt: int, num_decks: int):
 # --- Callback Query Handler ---
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает все нажатия на инлайн-кнопки."""
-    query = update.callback_query
-    data = query.data
-    user = query.from_user
-
-    # Отвечаем на callback как можно раньше, чтобы убрать "часики" (кроме случаев, где нужен alert)
-    # Это можно сделать позже в специфических обработчиках, если нужно показать alert
-    # await query.answer() # Пока закомментируем, ответы будут в обработчиках
-
-    # Базовая проверка пользователя (на всякий случай)
+    query = update.callback_query; data = query.data; user = query.from_user
     user_data = get_or_create_user(user.id)
     if user_data is None:
-        try: await query.answer("Ошибка получения данных пользователя.", show_alert=True)
-        except BadRequest: pass # Игнорируем ошибки ответа на старые запросы
-        return
+        try: await query.answer("Ошибка данных пользователя.", show_alert=True); return
+        except BadRequest: pass
 
-    logger.debug(f"Callback: data='{data}', user={user.id} ({user.full_name}), chat={query.message.chat_id}, msg={query.message.message_id}")
+    logger.debug(f"Callback: data='{data}', user={user.id}, chat={query.message.chat_id}")
 
-    # --- Обработка ставок ---
     if data.startswith("bj_bet_"):
-        try:
-            bet_amount = int(data.split("_")[2])
-            # Вызываем обработчик ставки, он сам ответит на query
-            await handle_blackjack_bet(update, context, bet_amount)
-        except (ValueError, IndexError) as e:
-            logger.error(f"Некорректные данные callback'а ставки: {data} - {e}")
-            try: await query.answer("Ошибка в данных ставки.", show_alert=True)
-            except BadRequest: pass
-        except Exception as e:
-            logger.error(f"Ошибка обработки callback'а ставки {data}: {e}", exc_info=True)
-            try: await query.answer("Произошла ошибка при обработке ставки.", show_alert=True)
-            except BadRequest: pass
+        try: bet_amount = int(data.split("_")[2]); await handle_blackjack_bet(update, context, bet_amount)
+        except (ValueError, IndexError) as e: logger.error(f"Callback ставки: {data} - {e}"); await query.answer("Ошибка ставки.", show_alert=True)
+        except Exception as e: logger.error(f"Ошибка callback ставки {data}: {e}", exc_info=True); await query.answer("Ошибка обработки ставки.", show_alert=True)
 
-    # --- Обработка кнопки "Новая игра" ---
     elif data == "bj_action_new_game":
-         try:
-             # Запускаем процесс начала новой игры
-             # blackjack_start сам удалит старое сообщение (если нужно) и отправит новое
-             # Он также сам ответит на query внутри себя
-             await blackjack_start(update, context)
-         except Exception as e:
-             logger.error(f"Ошибка запуска новой игры с кнопки: {e}", exc_info=True)
-             # Пытаемся ответить пользователю, если что-то пошло не так
-             try: await query.answer("Ошибка запуска новой игры.", show_alert=True)
-             except BadRequest: pass
+         try: await blackjack_start(update, context)
+         except Exception as e: logger.error(f"Ошибка новой игры с кнопки: {e}", exc_info=True); await query.answer("Ошибка запуска.", show_alert=True)
 
-    # --- Обработка действий в игре (Hit, Stand, Double, Split) ---
     elif data.startswith("bj_action_"):
         parts = data.split("_")
-        # Ожидаем формат "bj_action_{тип}_{индекс_руки}" -> 4 части
         if len(parts) == 4:
-            try:
-                action_type = parts[2]
-                hand_index = int(parts[3])
-                # Вызываем обработчик действия, он сам ответит на query или обновит сообщение
-                await handle_blackjack_action(update, context, action_type, hand_index)
-            except ValueError:
-                logger.warning(f"Неверный индекс руки в данных действия: {data}")
-                try: await query.answer("Неверный индекс руки.", show_alert=True)
-                except BadRequest: pass
-            except IndexError:
-                 logger.warning(f"Неверный формат данных действия (IndexError): {data}")
-                 try: await query.answer("Неверный формат действия.", show_alert=True)
-                 except BadRequest: pass
-            except Exception as e:
-                 logger.error(f"Ошибка обработки callback'а действия ({data}): {e}", exc_info=True)
-                 try: await query.answer("Ошибка обработки действия.", show_alert=True)
-                 except BadRequest: pass
-        else:
-             logger.warning(f"Неверный формат данных действия (количество частей != 4): {data}")
-             try: await query.answer("Неверный формат данных действия.", show_alert=True)
-             except BadRequest: pass
+            try: action_type, hand_index = parts[2], int(parts[3]); await handle_blackjack_action(update, context, action_type, hand_index)
+            except ValueError: logger.warning(f"Неверный индекс руки: {data}"); await query.answer("Неверный индекс.", show_alert=True)
+            except IndexError: logger.warning(f"Неверный формат действия: {data}"); await query.answer("Неверный формат.", show_alert=True)
+            except Exception as e: logger.error(f"Ошибка callback действия ({data}): {e}", exc_info=True); await query.answer("Ошибка действия.", show_alert=True)
+        else: logger.warning(f"Неверный формат данных действия: {data}"); await query.answer("Неверный формат.", show_alert=True)
 
-    # --- Обработка неизвестных callback'ов ---
-    else:
-        logger.warning(f"Получены неизвестные данные callback'а: {data} от пользователя {user.id}")
-        try:
-            # Просто отвечаем, чтобы убрать "часики" на кнопке
-            await query.answer()
-        except BadRequest: pass # Игнорируем ошибки ответа на старые запросы
+    else: logger.warning(f"Неизвестный callback: {data} от {user.id}"); await query.answer()
+
+
+# --- Error Handler ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Логирует ошибки и отправляет сообщение пользователю при необходимости."""
+    logger.error("Exception while handling an update:", exc_info=context.error)
+
+    # Обработка конфликта getUpdates (запущено несколько инстансов)
+    if isinstance(context.error, Conflict):
+        logger.critical("Обнаружен конфликт getUpdates! Убедитесь, что запущена только одна копия бота с этим токеном.")
+        # Здесь можно попытаться остановить текущий процесс, если он лишний, но это сложно надежно реализовать.
+        # Лучше решить проблему на уровне деплоя/запуска.
+        return # Не спамим пользователю об этой ошибке
+
+    # Другие ошибки BadRequest часто связаны с форматированием или невалидными запросами
+    # Можно добавить более детальную обработку, если нужно
+    if isinstance(context.error, BadRequest):
+         logger.warning(f"BadRequest Error: {context.error}. Update: {update}")
+         # Можно попытаться извлечь chat_id и отправить сообщение, но update может быть None
+         # if update and hasattr(update, 'effective_chat') and update.effective_chat:
+         #    try: await context.bot.send_message(update.effective_chat.id, "Произошла ошибка обработки запроса.")
+         #    except: pass # Игнорируем ошибки отправки сообщения об ошибке
+         return
+
+    # Для других ошибок можно добавить отправку сообщения пользователю, если это имеет смысл
+    # logger.exception(f"Unhandled error: {context.error}") # Логируем с полным traceback
 
 
 # --- Main Function ---
 def main():
     """Запускает бота."""
     logger.info("Инициализация и запуск бота...")
-    keep_alive() # Запускаем веб-сервер для Render/платформы
+    keep_alive() # Запускаем веб-сервер
 
-    # --- Настройка приложения PTB ---
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .concurrent_updates(True) # Разрешаем обработку нескольких апдейтов одновременно
-        # .connection_pool_size(10) # Можно увеличить пул соединений при необходимости
-        # .read_timeout(30) # Увеличить таймаут чтения (если нужно)
-        # .write_timeout(30) # Увеличить таймаут записи (если нужно)
-        .build()
-    )
-
-    # --- Инициализация хранилищ в bot_data ---
-    # Используем setdefault для потокобезопасной инициализации
-    application.bot_data.setdefault('games', {})
-    application.bot_data.setdefault('user_cache', {})
-    logger.info("Хранилища 'games' и 'user_cache' инициализированы в bot_data.")
+    application = ( Application.builder().token(BOT_TOKEN).concurrent_updates(True).build() )
+    application.bot_data.setdefault('games', {}); application.bot_data.setdefault('user_cache', {})
+    logger.info("Хранилища 'games' и 'user_cache' инициализированы.")
 
     # --- Регистрация обработчиков ---
-    # Команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("bonus", bonus))
     application.add_handler(CommandHandler("leaderboard", leaderboard))
     application.add_handler(CommandHandler("blackjack", blackjack_start))
-
-    # Обработчик для всех инлайн-кнопок
     application.add_handler(CallbackQueryHandler(button_callback_handler))
+    # Регистрируем обработчик ошибок
+    application.add_error_handler(error_handler)
+    logger.info("Обработчики команд, callback'ов и ошибок зарегистрированы.")
 
-    # Можно добавить обработчик ошибок для логирования необработанных исключений
-    # application.add_error_handler(error_handler_callback)
-
-    logger.info("Обработчики команд и callback'ов зарегистрированы.")
     print("Бот запускается... Нажмите Ctrl+C для остановки.")
-
-    # --- Запуск бота ---
     try:
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # Запускаем бота
+        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True) # drop_pending_updates может помочь с конфликтами при перезапуске
+    except Conflict as e:
+         logger.critical(f"Критическая ошибка Conflict при запуске polling: {e}. Убедитесь, что не запущена другая копия бота!")
     except Exception as e:
         logger.critical(f"Критическая ошибка при запуске или работе бота: {e}", exc_info=True)
     finally:
@@ -1477,6 +1101,6 @@ def main():
         logger.info("Бот остановлен.")
 
 if __name__ == "__main__":
-    print("Запуск скрипта blackjack_bot.py...")
+    print(f"Запуск скрипта {os.path.basename(__file__)}...")
     # init_db_manual() # Раскомментируйте для вывода SQL инициализации БД
     main()
