@@ -642,7 +642,8 @@ async def blackjack_handle_bet(update: Update, context: ContextTypes.DEFAULT_TYP
     shuffle_threshold = bj_session_data.get('shuffle_threshold_count')
     total_cards = bj_session_data.get('total_cards_in_deck', NUM_DECKS * 52) # Fallback just in case
 
-    shuffle_notification = None # To store shuffle message if needed
+    # <<< FIX: Initialize shuffle_notification as empty string >>>
+    shuffle_notification = ""
 
     if persistent_deck is None or shuffle_threshold is None:
         logger.error(f"Persistent deck data missing for user {uid}. Cannot proceed.")
@@ -660,6 +661,7 @@ async def blackjack_handle_bet(update: Update, context: ContextTypes.DEFAULT_TYP
         persistent_deck = create_deck() # Create a new shuffled deck
         bj_session_data['persistent_deck'] = persistent_deck # Update the deck in user_data
         cards_remaining = len(persistent_deck) # Update remaining count
+        # <<< FIX: Assign message only if shuffle happens >>>
         shuffle_notification = "♻️ Идет перетасовка колоды...\n\n" # Message to show user
         logger.info(f"User {uid}: Deck reshuffled. Cards remaining: {cards_remaining}")
 
@@ -676,6 +678,7 @@ async def blackjack_handle_bet(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
              logger.warning(f"Could not edit message {bet_prompt_message_id} to show shuffle: {e}")
              # Continue anyway, shuffle still happened
+    # <<< FIX: No 'else' needed here, shuffle_notification defaults to "" >>>
 
     # --- Process Bet ---
     if update_balance(uid, -bet) is None:
@@ -704,7 +707,12 @@ async def blackjack_handle_bet(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"BJ dealing error for user {uid}: {e}")
         update_balance(uid, bet) # Attempt refund
         try:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=bet_prompt_message_id, text=f"❌ Ошибка раздачи карт ({e}). Ставка {bet} F возвращена.")
+            # Use edit_message_text on the original prompt message ID
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=bet_prompt_message_id,
+                text=f"❌ Ошибка раздачи карт ({e}). Ставка {bet} F возвращена.",
+                reply_markup=None # Remove buttons on error
+            )
         except Exception: pass
         context.user_data.pop(BJ_GAME_KEY, None) # Clean game state
         return
@@ -712,7 +720,11 @@ async def blackjack_handle_bet(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"BJ unexpected dealing error for user {uid}: {e}", exc_info=True)
         update_balance(uid, bet) # Attempt refund
         try:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=bet_prompt_message_id, text=f"❌ Непредвиденная ошибка ({e}). Ставка {bet} F возвращена.")
+             await context.bot.edit_message_text(
+                 chat_id=chat_id, message_id=bet_prompt_message_id,
+                 text=f"❌ Непредвиденная ошибка ({e}). Ставка {bet} F возвращена.",
+                 reply_markup=None
+             )
         except Exception: pass
         context.user_data.pop(BJ_GAME_KEY, None)
         return
@@ -763,7 +775,8 @@ async def blackjack_handle_bet(update: Update, context: ContextTypes.DEFAULT_TYP
         'outcome_text': outcome_text, # Store immediate outcome if any
         'outcome_determined': (game_state == 'game_over'),
         'total_winnings_paid': winnings if game_state == 'game_over' else 0.0,
-        'shuffle_occurred_message': shuffle_notification # Pass shuffle message if it happened
+        # <<< FIX: Store the (potentially empty) string >>>
+        'shuffle_occurred_message': shuffle_notification
     })
 
     # --- Update Telegram Message ---
@@ -781,7 +794,7 @@ async def blackjack_handle_bet(update: Update, context: ContextTypes.DEFAULT_TYP
         bj_session_data['message_id'] = new_message_info.message_id
         logger.info(f"BJ initial hand state sent (msg {new_message_info.message_id}) for user {uid}. State: {game_state}")
         # Clear the shuffle message after showing it once
-        bj_session_data.pop('shuffle_occurred_message', None)
+        bj_session_data.pop('shuffle_occurred_message', None) # Use pop to safely remove
 
         # If game ended immediately (BJ), transition state back to 'waiting_bet'
         if bj_session_data.get('outcome_determined'): # Use get to avoid KeyError if already popped
@@ -807,15 +820,15 @@ async def blackjack_handle_bet(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # Acknowledge the button press
     # Answer should have been sent earlier if shuffle occurred, otherwise answer now
-    if not shuffle_notification:
+    if not shuffle_notification: # Check if shuffle notification string is empty
         try:
              await q.answer(f"Ставка принята: {bet} F")
         except BadRequest as e: # Handle "query is too old" if user was slow
             if "query is too old" in str(e).lower():
                 logger.debug(f"Query too old to answer bet confirmation for user {uid}")
             else:
-                raise e
-
+                logger.error(f"Error answering bet confirmation for user {uid}: {e}") # Log other errors
+                # Don't re-raise, but log it
 
 async def blackjack_show_state(
     context: ContextTypes.DEFAULT_TYPE,
