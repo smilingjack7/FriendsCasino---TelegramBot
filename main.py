@@ -1445,41 +1445,20 @@ async def blackjack_determine_outcome(context: ContextTypes.DEFAULT_TYPE, chat_i
 # --- All rl_ functions below have been checked for indentation issues ---
 
 # --- Roulette Keyboards (Adapted with rl_ prefix) ---
-def rl_get_main_menu_keyboard(chat_data: dict, context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
+def rl_get_main_menu_keyboard(chat_data: dict, mention_map: dict) -> InlineKeyboardMarkup: # Takes mention_map now
     game_state = chat_data.get(RL_GAME_KEY, {})
-    state = game_state.get('state', 'idle') #'idle', 'accepting_bets', 'spinning', 'finished'
+    state = game_state.get('state', 'idle')
     active_bets_by_user = game_state.get('active_bets', {}) # {user_id: [bet_dict, ...]}
 
     keyboard = []
     total_bets_count = sum(len(bets) for bets in active_bets_by_user.values())
     total_bet_amount = sum(b['amount'] for bets in active_bets_by_user.values() for b in bets)
 
-    # Display Active Bets (Grouped by User)
+    # Display Active Bets (Grouped by User using provided mention_map)
     if active_bets_by_user:
-         bet_lines = []
-         user_ids = list(active_bets_by_user.keys())
-         # --- Fetch mentions asynchronously within the main loop ---
-         # We need to run the async function get_user_mention properly.
-         # Since this function itself isn't async, we use asyncio.run_coroutine_threadsafe
-         # if running in a separate thread, or ensure get_main_menu_keyboard
-         # is called from an async context. For simplicity here, we assume
-         # it's called where we can await. If called synchronously, this part needs adjustment.
-         # A common pattern is to pre-fetch mentions if possible or display IDs as fallback.
-         # Let's fetch them here assuming an async context for rl_show_game_state.
-         # NOTE: This fetch will block if called synchronously. Best practice is to call
-         # get_main_menu_keyboard from within an async function.
-         # Simplified sync call for now (might block):
-         try:
-             mentions = asyncio.run(asyncio.gather(*(get_user_mention(context, uid) for uid in user_ids)))
-             mention_map = dict(zip(user_ids, mentions))
-         except RuntimeError: # Cannot run nested event loops
-             logger.warning("Could not fetch user mentions synchronously for roulette keyboard. Displaying IDs.")
-             mention_map = {uid: f"User_{uid}" for uid in user_ids}
-
-
          keyboard.append([InlineKeyboardButton("📝 Текущие ставки:", callback_data='rl_noop')]) # Header
          for user_id, bets in active_bets_by_user.items():
-             user_mention = mention_map.get(user_id, f"User_{user_id}")
+             user_mention = mention_map.get(user_id, f"User_{user_id}") # Use map
              bet_str = ", ".join([f"{b['value_display']} ({b['amount']}F)" for b in bets])
              # Ensure button text isn't excessively long
              button_text = f"{user_mention}: {bet_str}"
@@ -1496,19 +1475,19 @@ def rl_get_main_menu_keyboard(chat_data: dict, context: ContextTypes.DEFAULT_TYP
             keyboard.append([InlineKeyboardButton("➕ Добавить ставку", callback_data='rl_start_bet')])
         else:
             keyboard.append([InlineKeyboardButton("🚫 Лимит ставок раунда достигнут", callback_data='rl_noop')])
-        # Spin button always available if bets exist
-        if active_bets_by_user:
+
+        # *** MODIFIED: Show Spin button ONLY if exactly one unique user has placed bets ***
+        if active_bets_by_user and len(active_bets_by_user) == 1:
             keyboard.append([InlineKeyboardButton("🎰 Крутить!", callback_data='rl_spin')])
+        # No "Spin" button if multiple users are betting (rely on timer)
+
     elif state == 'idle':
          keyboard.append([InlineKeyboardButton("▶️ Начать раунд (сделать ставку)", callback_data='rl_start_bet')])
     elif state == 'spinning':
         keyboard.append([InlineKeyboardButton("⏳ Колесо вращается...", callback_data='rl_noop')])
     elif state == 'finished':
-        # After results are shown, this state might be used briefly before resetting to idle
-        # Or we could immediately reset to idle in spin_logic
          keyboard.append([InlineKeyboardButton("🔄 Начать новый раунд (/roulette)", callback_data='rl_noop')]) # Info only
 
-    # Always show help
     keyboard.append([InlineKeyboardButton("❓ Правила Рулетки", callback_data='rl_show_help')])
 
     return InlineKeyboardMarkup(keyboard)
@@ -1695,13 +1674,13 @@ async def roulette_start_command(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def rl_show_game_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_text: str | None = None, edit_existing: bool = True):
-    """Sends or edits the main roulette game message."""
-    chat_data = context.application.chat_data.get(chat_id, {}) # Use application.chat_data in jobs/callbacks
+    """Sends or edits the main roulette game message. Fetches mentions first."""
+    # Use application.chat_data as this can be called from jobs/callbacks
+    chat_data = context.application.chat_data.get(chat_id, {})
     game_state = chat_data.get(RL_GAME_KEY)
 
     if not game_state:
         logger.warning(f"rl_show_game_state called for chat {chat_id} but no game state found.")
-        # Maybe send an error message?
         try:
             await context.bot.send_message(chat_id, "Ошибка: Не удалось найти данные игры в рулетку.")
         except Exception:
@@ -1711,6 +1690,19 @@ async def rl_show_game_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, m
     message_id = game_state.get('message_id')
     state = game_state.get('state', 'unknown')
     timer_job_name = game_state.get('timer_job_name')
+    active_bets_by_user = game_state.get('active_bets', {})
+
+    # *** MODIFIED: Fetch mentions here ***
+    mention_map = {}
+    user_ids = list(active_bets_by_user.keys())
+    if user_ids:
+        try:
+            # Ensure this function is awaited correctly when called
+            mentions = await asyncio.gather(*(get_user_mention(context, uid) for uid in user_ids))
+            mention_map = dict(zip(user_ids, mentions))
+        except Exception as e:
+            logger.error(f"Failed to fetch user mentions for roulette state in chat {chat_id}: {e}")
+            mention_map = {uid: f"User_{uid}" for uid in user_ids} # Fallback if fetching fails
 
     # --- Build Text ---
     # Determine base text based on state if not provided
@@ -1723,23 +1715,22 @@ async def rl_show_game_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, m
              base_text = "🏁 Раунд Рулетки завершен.\nИспользуйте /roulette для начала нового раунда."
         else:
              base_text = f"🎲 <b>Американская Рулетка</b> [Состояние: {state}]"
+    else:
+        base_text = message_text # Use provided text (e.g., "Ставка принята")
 
     timer_text = ""
-    if timer_job_name and context.job_queue.get_jobs_by_name(timer_job_name):
-         # Calculate remaining time (approximate)
+    if timer_job_name:
+         # Use context.job_queue which should be available
          jobs = context.job_queue.get_jobs_by_name(timer_job_name)
-         if jobs:
-              next_t = jobs[0].next_t
-              if next_t:
-                   remaining = max(0, int(next_t.timestamp() - time.time()))
-                   timer_text = f"\n⏳ <i>Авто-старт через ~{remaining} сек...</i>"
+         if jobs and jobs[0].next_t:
+              # Calculate remaining time (approximate)
+              remaining = max(0, int(jobs[0].next_t.timestamp() - time.time()))
+              timer_text = f"\n⏳ <i>Авто-старт через ~{remaining} сек...</i>"
 
     full_text = base_text + timer_text
 
-    # --- Build Keyboard ---
-    # Need to handle the async call carefully if rl_show_game_state can be called synchronously
-    # For now, assuming it's called from an async context (handlers, jobs)
-    reply_markup = rl_get_main_menu_keyboard(chat_data, context) # Pass context for get_user_mention
+    # --- Build Keyboard (Pass mention_map) ---
+    reply_markup = rl_get_main_menu_keyboard(chat_data, mention_map)
 
     # --- Send or Edit ---
     sent_message = None
@@ -1768,7 +1759,8 @@ async def rl_show_game_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, m
                 reply_markup=reply_markup,
                 parse_mode=ParseMode.HTML
             )
-            game_state['message_id'] = sent_message.message_id # Update message ID
+            # Update message ID only if a new message was actually sent
+            game_state['message_id'] = sent_message.message_id
             logger.info(f"Sent new roulette state message {sent_message.message_id} in chat {chat_id}")
             new_message_sent = True
 
@@ -1796,8 +1788,8 @@ async def rl_show_game_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, m
         logger.error(f"Unexpected error showing roulette state for chat {chat_id} (msg {message_id}): {e}", exc_info=True)
         return None # Indicate failure
 
-    return sent_message if new_message_sent else message_id # Return Message or existing ID
-
+    # Return Message object if new, or the (potentially unchanged) message_id if edited/not modified
+    return sent_message if new_message_sent else message_id
 # --- Roulette Betting Logic Callbacks (Checked Indentation) ---
 
 async def rl_start_bet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2077,18 +2069,18 @@ async def rl_choose_bet_amount_callback(update: Update, context: ContextTypes.DE
 
 
 async def rl_confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles confirmation 'Yes' button."""
+    """Handles confirmation 'Yes' button. Updates main state directly."""
     query = update.callback_query
     user = query.from_user
     chat_id = query.message.chat_id
     temp_bet = context.user_data.get(RL_USER_TEMP_BET_KEY)
 
+    # --- Validations (as before) ---
     if not temp_bet or temp_bet.get('step') != 'confirm':
         await query.answer("Неверный шаг или ставка отменена.", show_alert=True)
-        await rl_show_game_state(context, chat_id, edit_existing=True)
+        await rl_show_game_state(context, chat_id, edit_existing=True) # Attempt to show current state
         return
 
-    # --- All checks before confirming ---
     chat_data = context.chat_data
     game_state = chat_data.get(RL_GAME_KEY)
     if not game_state or game_state.get('state') != 'accepting_bets':
@@ -2128,7 +2120,7 @@ async def rl_confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_
          await rl_show_game_state(context, chat_id, edit_existing=True)
          return
 
-    # --- Deduct balance and add bet ---
+    # --- Deduct balance and add bet (as before) ---
     new_balance = update_balance(user.id, -bet_amount)
     if new_balance is None:
         await query.answer("Ошибка списания средств со счета!", show_alert=True)
@@ -2136,8 +2128,6 @@ async def rl_confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_
         await rl_show_game_state(context, chat_id, edit_existing=True)
         return
 
-    # Add bet to chat_data
-    # Make a copy to avoid modifying the temp_bet dict elsewhere
     final_bet = {
         'type': temp_bet['type'],
         'value': temp_bet['value'],
@@ -2147,7 +2137,7 @@ async def rl_confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_
     if user.id not in active_bets_by_user:
         active_bets_by_user[user.id] = []
     active_bets_by_user[user.id].append(final_bet)
-    game_state['active_bets'] = active_bets_by_user # Ensure update back to chat_data
+    game_state['active_bets'] = active_bets_by_user
 
     # Clean up user's temporary bet data
     context.user_data.pop(RL_USER_TEMP_BET_KEY, None)
@@ -2155,7 +2145,7 @@ async def rl_confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.answer("✅ Ставка принята!")
     logger.info(f"User {user.id} placed bet in chat {chat_id}: {final_bet}")
 
-    # --- Start Timer if First Bet ---
+    # --- Start Timer if First Bet (as before) ---
     current_total_bets = sum(len(bets) for bets in active_bets_by_user.values())
     timer_job_name = f'rl_spin_timer_{chat_id}'
     existing_jobs = context.job_queue.get_jobs_by_name(timer_job_name)
@@ -2166,15 +2156,15 @@ async def rl_confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_
             RL_BET_TIMER_SECONDS,
             chat_id=chat_id,
             name=timer_job_name,
-            data={'chat_id': chat_id} # Pass chat_id to job
+            data={'chat_id': chat_id}
         )
-        game_state['timer_job_name'] = timer_job_name # Store job name
+        game_state['timer_job_name'] = timer_job_name
         logger.info(f"Started roulette timer '{timer_job_name}' for chat {chat_id}")
 
-    # --- Update the main game message ---
-    user_mention = user.mention_html() # Get mention here
-    await rl_show_game_state(context, chat_id, message_text=f"✅ Ставка от {user_mention}: {final_bet['value_display']} ({final_bet['amount']} F) принята!", edit_existing=True)
-
+    # *** MODIFIED: Show main menu state directly, overwriting the confirmation message ***
+    # Pass message_text=None to use the default text for 'accepting_bets' state
+    # edit_existing=True ensures we edit the message the user was interacting with
+    await rl_show_game_state(context, chat_id, message_text=None, edit_existing=True)
 
 async def rl_cancel_bet_step_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles 'Cancel' or 'Back' buttons during bet creation."""
