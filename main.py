@@ -57,6 +57,7 @@ RL_BET_TIMER_SECONDS = 45
 RL_SPIN_ANIMATION_DURATION = 8.0
 RL_GAME_KEY = 'roulette_game'
 RL_USER_TEMP_BET_KEY = 'roulette_temp_bet'
+RL_TIMER_DISPLAY_UPDATE_INTERVAL = 2.0 # How often to update the timer text (seconds)
 AMERICAN_WHEEL_ORDER = [
     '0', '28', '9', '26', '30', '11', '7', '20', '32', '17', '5', '22', '34',
     '15', '3', '24', '36', '13', '1', '00', '27', '10', '25', '29', '12', '8',
@@ -473,7 +474,6 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Не удалось отобразить таблицу лидеров.")
 
 # --- Blackjack Game (Private Chat Only - Full Code, Checked) ---
-# Paste the FULL, working Blackjack code (from previous correct version) here.
 # --- Start of Full Blackjack Code ---
 async def blackjack_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -917,8 +917,14 @@ async def blackjack_show_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
                     parse_mode=ParseMode.HTML
                 )
                 # IMPORTANT: Update game state with the new message ID
-                game_state['message_id'] = new_message.message_id
-                logger.debug(f"Sent NEW BJ state msg {new_message.message_id} for user {user_id}. Updated game state.")
+                # Make sure game_state still exists before updating
+                current_game_state = context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
+                if current_game_state:
+                    current_game_state['message_id'] = new_message.message_id
+                    logger.debug(f"Sent NEW BJ state msg {new_message.message_id} for user {user_id}. Updated game state.")
+                else:
+                    logger.warning(f"Sent NEW BJ state msg {new_message.message_id} for user {user_id}, but game state disappeared before update.")
+
                 result = new_message # Return the new Message object
                 break # Exit retry loop
 
@@ -935,7 +941,10 @@ async def blackjack_show_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
                  logger.error(f"Message {message_id_to_process} or Chat {chat_id} not found/editable for user {user_id}. Forcing send new.")
                  edit_existing = False
                  message_id_to_process = None # Clear the invalid ID
-                 game_state['message_id'] = None # Clear from game state too
+                 # Also clear from game state if it exists
+                 current_game_state_on_edit_fail = context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
+                 if current_game_state_on_edit_fail:
+                     current_game_state_on_edit_fail['message_id'] = None
                  current_retry += 1
                  if current_retry > max_retries: # If retries exhausted after trying to send new
                      logger.error(f"CRITICAL: Failed to send new message after edit failed for user {user_id}. Cleaning game state.")
@@ -1006,7 +1015,9 @@ async def blackjack_handle_action(update: Update, context: ContextTypes.DEFAULT_
     if not game or game.get('state') != 'player_turn' or game.get('message_id') != action_message_id:
         await q.answer("Эта игра или действие больше неактивны.", show_alert=False)
         # Try to remove buttons from the stale message if it's the one interacted with
-        if game.get('message_id') == action_message_id:
+        # Check if game state still exists before trying to edit
+        current_game_state = context.user_data.get(BJ_GAME_KEY, {})
+        if current_game_state.get('message_id') == action_message_id:
              try:
                  await context.bot.edit_message_reply_markup(chat_id=chat_id, message_id=action_message_id, reply_markup=None)
              except Exception: pass # Ignore if removal fails
@@ -1240,7 +1251,7 @@ async def blackjack_handle_action(update: Update, context: ContextTypes.DEFAULT_
              except Exception: pass
 
     # Special handling for Ace split: always moves to the next hand/dealer immediately after the split action completes
-    is_ace_split_action = (action == 'split' and get_card_value(hand[0] if hand else None) == 11)
+    is_ace_split_action = (action == 'split' and len(hand) == 2 and hand[0] and get_card_value(hand[0]) == 11) # Check card exists
 
     # If the hand is finished (bust, stand, double, failed draw) or it was an Ace split, schedule the next action
     if move_to_next or is_ace_split_action:
@@ -1564,7 +1575,7 @@ async def blackjack_determine_outcome(context: ContextTypes.DEFAULT_TYPE, chat_i
 # --- End of Full Blackjack Code ---
 
 
-# --- Roulette Game (Full Code, Checked) ---
+# --- Roulette Game (Full Code, Checked & Updated) ---
 # --- Start of Full Roulette Code ---
 def rl_get_main_menu_keyboard(chat_data: dict, display_name_map: dict) -> InlineKeyboardMarkup:
     """Generates the main keyboard for the roulette game state."""
@@ -1610,8 +1621,8 @@ def rl_get_main_menu_keyboard(chat_data: dict, display_name_map: dict) -> Inline
              keyboard.append([InlineKeyboardButton("🎰 Крутить!", callback_data='rl_spin')])
 
     elif state == 'idle' or state == 'finished':
-         # Prompt to start a new round (using command)
-         keyboard.append([InlineKeyboardButton("▶️ Начать новый раунд (/roulette)", callback_data='rl_noop')])
+         # Button now triggers a specific callback instead of noop
+         keyboard.append([InlineKeyboardButton("▶️ Начать новый раунд", callback_data='rl_new_round')]) # <<< MODIFIED
 
     elif state == 'spinning':
         # Indicate wheel is spinning
@@ -1720,7 +1731,12 @@ async def rl_spin_roulette_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Verify game state before proceeding
     if not game_state or game_state.get('state') != 'accepting_bets':
         logger.warning(f"Roulette timer job fired for chat {chat_id}, but game not in 'accepting_bets' state ({game_state.get('state') if game_state else 'No Game'}). Aborting.")
-        if game_state: game_state.pop('timer_job_name', None) # Clean up timer name if state exists
+        # Ensure display timer is also potentially cleaned up if state is wrong
+        display_timer_name = game_state.get('timer_display_job_name') if game_state else None
+        if display_timer_name:
+             await rl_remove_job_if_exists(display_timer_name, context)
+             if game_state: game_state.pop('timer_display_job_name', None) # Check game_state again
+        if game_state: game_state.pop('timer_job_name', None) # Clean up main timer name if state exists
         return
 
     active_bets_by_user = game_state.get('active_bets', {})
@@ -1729,16 +1745,22 @@ async def rl_spin_roulette_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not active_bets_by_user:
         logger.warning(f"Roulette timer job fired for chat {chat_id}, but no bets placed. Ending round.")
         game_state['state'] = 'idle' # Reset state
-        game_state.pop('timer_job_name', None) # Clean timer name
+        # Remove both timer names and jobs
+        spin_timer_name = game_state.pop('timer_job_name', None) # Remove main timer name
+        display_timer_name = game_state.pop('timer_display_job_name', None) # Remove display timer name
+        if spin_timer_name: await rl_remove_job_if_exists(spin_timer_name, context)
+        if display_timer_name: await rl_remove_job_if_exists(display_timer_name, context)
+
         message_id = game_state.get('message_id')
         if message_id:
             try:
-                # Update message to indicate no bets were placed
+                # Generate final keyboard before editing message
+                final_reply_markup = rl_get_main_menu_keyboard(chat_data, {})
                 await context.bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text="⏳ Время для ставок истекло. Ставок не было.\nНачните новый раунд /roulette",
-                    reply_markup=None # Remove buttons
+                    text="⏳ Время для ставок истекло. Ставок не было.\nНачните новый раунд.",
+                    reply_markup=final_reply_markup
                 )
             except Exception as e:
                  logger.warning(f"Could not edit message in chat {chat_id} after timer expired with no bets: {e}")
@@ -1746,8 +1768,61 @@ async def rl_spin_roulette_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Bets exist, proceed to spin
     logger.info(f"Roulette timer starting spin for chat {chat_id}")
-    game_state.pop('timer_job_name', None) # Clean timer name before spin logic
+    # Timer removal is now handled inside rl_spin_roulette_logic
     await rl_spin_roulette_logic(context, chat_id)
+
+
+async def rl_update_timer_display_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Repeating job to update the timer display in the roulette message."""
+    job_data = context.job.data
+    chat_id = job_data.get('chat_id')
+    main_timer_job_name = job_data.get('main_timer_job_name')
+
+    if not chat_id or not main_timer_job_name:
+        logger.error(f"Roulette display timer job missing data: {job_data}")
+        if context.job: context.job.schedule_removal() # Remove self if broken
+        return
+
+    # Use application.chat_data
+    chat_data = context.application.chat_data.get(chat_id, {})
+    game_state = chat_data.get(RL_GAME_KEY)
+    this_job_name = context.job.name if context.job else None
+
+    # --- Check conditions to continue running ---
+    # 1. Game must exist and be in 'accepting_bets' state
+    if not game_state or game_state.get('state') != 'accepting_bets':
+        logger.debug(f"Stopping display timer job '{this_job_name}' for chat {chat_id}: Game state is not 'accepting_bets' ({game_state.get('state') if game_state else 'No Game'}).")
+        if context.job: context.job.schedule_removal() # Remove self
+        # Ensure the name is cleared from game_state if it matches this job
+        if game_state and game_state.get('timer_display_job_name') == this_job_name:
+             game_state.pop('timer_display_job_name', None)
+        return
+
+    # 2. The main timer job must still exist
+    main_timer_jobs = context.job_queue.get_jobs_by_name(main_timer_job_name)
+    if not main_timer_jobs:
+        logger.debug(f"Stopping display timer job '{this_job_name}' for chat {chat_id}: Main timer job '{main_timer_job_name}' not found.")
+        if context.job: context.job.schedule_removal() # Remove self
+        # Also ensure the display timer name is cleared from game_state if it matches this job
+        if game_state and game_state.get('timer_display_job_name') == this_job_name:
+            game_state.pop('timer_display_job_name', None)
+        # Attempt one final update without the timer text before stopping
+        await rl_show_game_state(context, chat_id, edit_existing=True)
+        return
+
+    # --- Update the message ---
+    # We simply call rl_show_game_state, which now knows how to fetch
+    # the remaining time from the main_timer_job_name stored in game_state.
+    update_result = await rl_show_game_state(context, chat_id, edit_existing=True)
+
+    # If updating the message fails (e.g., deleted message, permissions), stop this job
+    if update_result is None:
+        logger.warning(f"Stopping display timer job '{this_job_name}' for chat {chat_id}: Failed to update game state message.")
+        if context.job: context.job.schedule_removal() # Remove self
+         # Also ensure the display timer name is cleared from game_state
+        if game_state and game_state.get('timer_display_job_name') == this_job_name:
+            game_state.pop('timer_display_job_name', None)
+
 
 async def rl_remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Removes job queue jobs by name if they exist."""
@@ -1779,30 +1854,35 @@ async def roulette_start_command(update: Update, context: ContextTypes.DEFAULT_T
 
     # Handle existing game states
     if game_state and game_state.get('state') == 'spinning':
-         # Inform user if game is currently spinning
          logger.info(f"Roulette game currently spinning in chat {chat_id}. Ignoring /roulette command.")
          try:
              await update.message.reply_text("⏳ Колесо рулетки уже вращается, подождите окончания раунда.", quote=True)
-         except Exception: pass # Ignore if reply fails
+         except Exception: pass
          return
     elif game_state and game_state.get('state') == 'accepting_bets':
-        # If game is accepting bets, just resend the state message (maybe user lost it)
         logger.info(f"Roulette game already active in chat {chat_id} (state: accepting_bets). Resending status message.")
         try:
-            # Delete the triggering /roulette command message
-            await update.message.delete()
+            await update.message.delete() # Delete the command message
         except Exception as e:
              logger.warning(f"Could not delete /roulette command message in chat {chat_id}: {e}")
         # Show the current game state again (send as new message)
-        await rl_show_game_state(context, chat_id, edit_existing=False)
+        # If the state is accepting bets, the message might have been lost, so resend
+        await rl_show_game_state(context, chat_id, edit_existing=False) # Force send new
         return
 
     # --- Start a New Round ---
     logger.info(f"Starting new roulette round in chat {chat_id}")
 
-    # Cancel any existing spin timer for this chat
-    old_timer_job_name = f'rl_spin_timer_{chat_id}'
-    await rl_remove_job_if_exists(old_timer_job_name, context)
+    # Cancel any existing spin timer AND display timer for this chat
+    old_spin_timer_job_name = game_state.get('timer_job_name') if game_state else None
+    old_display_timer_job_name = game_state.get('timer_display_job_name') if game_state else None
+
+    if old_spin_timer_job_name:
+        await rl_remove_job_if_exists(old_spin_timer_job_name, context)
+        logger.info(f"Removed old spin timer '{old_spin_timer_job_name}' for chat {chat_id}")
+    if old_display_timer_job_name:
+        await rl_remove_job_if_exists(old_display_timer_job_name, context)
+        logger.info(f"Removed old display timer '{old_display_timer_job_name}' for chat {chat_id}")
 
     # Delete previous game message if it exists
     if game_state and game_state.get('message_id'):
@@ -1810,16 +1890,16 @@ async def roulette_start_command(update: Update, context: ContextTypes.DEFAULT_T
             await context.bot.delete_message(chat_id, game_state['message_id'])
             logger.debug(f"Deleted previous roulette message {game_state['message_id']} in chat {chat_id}")
         except Exception as e:
-            # Log failure but proceed, message might be gone already
             logger.debug(f"Failed to delete previous roulette message {game_state.get('message_id')} in chat {chat_id}: {e}")
 
     # Initialize new game state in chat_data
     new_game_state = {
         'state': 'accepting_bets',
-        'active_bets': {}, # user_id -> list of bet dicts
-        'message_id': None, # Will be set by rl_show_game_state
-        'timer_job_name': None, # Will be set when first bet is placed
-        'initiator_id': user.id # Store who started the round (optional)
+        'active_bets': {},
+        'message_id': None,
+        'timer_job_name': None, # For the main spin trigger
+        'timer_display_job_name': None, # For the repeating display update
+        'initiator_id': user.id
     }
     chat_data[RL_GAME_KEY] = new_game_state
 
@@ -1834,7 +1914,61 @@ async def roulette_start_command(update: Update, context: ContextTypes.DEFAULT_T
         context,
         chat_id,
         message_text="🎲 <b>Американская Рулетка!</b>\nДелайте ваши ставки!",
-        edit_existing=False
+        edit_existing=False # Send as a new message
+    )
+
+
+async def rl_new_round_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the 'Start New Round' button press from the main keyboard."""
+    query = update.callback_query
+    user = query.from_user
+    chat = query.message.chat
+    chat_id = chat.id
+    logger.info(f"'rl_new_round' callback from user {user.id} in chat {chat_id}")
+
+    await query.answer("Запуск нового раунда...")
+
+    get_or_create_user(user.id) # Ensure user profile exists
+
+    # Use application.chat_data for shared game state in this chat
+    chat_data = context.chat_data
+    game_state = chat_data.get(RL_GAME_KEY)
+    current_message_id = query.message.message_id
+
+    # --- Clean up previous round state ---
+    # Cancel any existing timers (spin timer AND display timer)
+    old_spin_timer_job_name = game_state.get('timer_job_name') if game_state else None
+    old_display_timer_job_name = game_state.get('timer_display_job_name') if game_state else None
+
+    if old_spin_timer_job_name:
+        await rl_remove_job_if_exists(old_spin_timer_job_name, context)
+    if old_display_timer_job_name:
+        await rl_remove_job_if_exists(old_display_timer_job_name, context)
+
+    # Delete the message containing the "Start New Round" button
+    try:
+        await context.bot.delete_message(chat_id, current_message_id)
+        logger.debug(f"Deleted previous roulette message {current_message_id} via rl_new_round_callback in chat {chat_id}")
+    except Exception as e:
+        logger.debug(f"Failed to delete message {current_message_id} in rl_new_round_callback for chat {chat_id}: {e}")
+
+    # Initialize new game state in chat_data
+    new_game_state = {
+        'state': 'accepting_bets',
+        'active_bets': {}, # user_id -> list of bet dicts
+        'message_id': None, # Will be set by rl_show_game_state
+        'timer_job_name': None, # Will be set when first bet is placed
+        'timer_display_job_name': None, # Will be set along with timer_job_name
+        'initiator_id': user.id # Store who started the round (optional)
+    }
+    chat_data[RL_GAME_KEY] = new_game_state
+
+    # Show the initial "Accepting Bets" state (send as new message)
+    await rl_show_game_state(
+        context,
+        chat_id,
+        message_text="🎲 <b>Американская Рулетка!</b>\nДелайте ваши ставки!",
+        edit_existing=False # Send as a new message
     )
 
 
@@ -1845,15 +1979,14 @@ async def rl_show_game_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, m
     game_state = chat_data.get(RL_GAME_KEY)
 
     if not game_state:
-        logger.warning(f"rl_show_game_state called for chat {chat_id} but no game state found.")
-        try:
-            await context.bot.send_message(chat_id, "Ошибка: Не удалось найти данные игры в рулетку.")
-        except Exception: pass
+        # Avoid logging warning spam if called by display timer job for a game that ended
+        # Check if called by timer job (could add context in job data) - for now, just lower log level
+        logger.debug(f"rl_show_game_state called for chat {chat_id} but no game state found.")
         return None # Indicate failure
 
     message_id = game_state.get('message_id')
     state = game_state.get('state', 'unknown')
-    timer_job_name = game_state.get('timer_job_name')
+    main_timer_job_name = game_state.get('timer_job_name') # Get the name of the ONE-SHOT timer
     active_bets_by_user = game_state.get('active_bets', {})
 
     # --- Get Display Names for Bettors ---
@@ -1876,7 +2009,7 @@ async def rl_show_game_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, m
         elif state == 'spinning':
             base_text = "🎰 <b>Колесо вращается...</b>"
         elif state == 'idle' or state == 'finished':
-             base_text = "🏁 Раунд Рулетки завершен.\nИспользуйте /roulette для начала нового раунда."
+             base_text = "🏁 Раунд Рулетки завершен.\nИспользуйте 'Начать новый раунд' ниже."
         else:
             base_text = f"🎲 <b>Американская Рулетка</b> [Состояние: {state}]" # Fallback
     else:
@@ -1885,20 +2018,26 @@ async def rl_show_game_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, m
 
     # Add timer info if active
     timer_text = ""
-    if timer_job_name:
-         jobs = context.job_queue.get_jobs_by_name(timer_job_name)
+    # Check if the main timer name exists in game_state
+    if main_timer_job_name:
+         jobs = context.job_queue.get_jobs_by_name(main_timer_job_name)
          if jobs and jobs[0].next_t: # Check if job exists and has a next run time
              remaining = max(0, int(jobs[0].next_t.timestamp() - time.time()))
              timer_text = f"\n⏳ <i>Авто-старт через ~{remaining} сек...</i>"
+         else:
+             # Main timer job doesn't exist or finished, but name might linger in state
+             logger.debug(f"Timer job name '{main_timer_job_name}' in state, but job not found/active in chat {chat_id}.")
+    # *** END MODIFIED SECTION ***
 
     full_text = base_text + timer_text
 
     # --- Generate Keyboard ---
-    reply_markup = rl_get_main_menu_keyboard(chat_data, display_name_map)
+    reply_markup = rl_get_main_menu_keyboard(chat_data, display_name_map) # Pass potentially updated chat_data
 
     # --- Send or Edit Message ---
     sent_message = None # To store new Message object if sent
     new_message_sent = False
+    edit_failed_and_sending_new = False
     try:
         if edit_existing and message_id:
             # Attempt to edit the existing message
@@ -1912,10 +2051,13 @@ async def rl_show_game_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, m
             logger.debug(f"Edited roulette state message {message_id} in chat {chat_id}")
         else:
             # Send a new message
-            # Delete old one first if we intended to edit but couldn't
-            if message_id and edit_existing: # 'edit_existing' might be True here if edit failed before
-                 try: await context.bot.delete_message(chat_id, message_id)
+            # Delete old one first if we intended to edit but couldn't find it
+            if message_id and edit_existing:
+                 try:
+                     await context.bot.delete_message(chat_id, message_id)
+                     logger.debug(f"Deleted old message {message_id} before sending new in chat {chat_id}")
                  except Exception: pass
+                 edit_failed_and_sending_new = True # Flag that edit failed
 
             sent_message = await context.bot.send_message(
                 chat_id=chat_id,
@@ -1923,9 +2065,15 @@ async def rl_show_game_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, m
                 reply_markup=reply_markup,
                 parse_mode=ParseMode.HTML
             )
-            # IMPORTANT: Update message_id in game state
-            game_state['message_id'] = sent_message.message_id
-            logger.info(f"Sent new roulette state message {sent_message.message_id} in chat {chat_id}")
+            # IMPORTANT: Update message_id in game state ONLY if game still exists
+            # Re-fetch game_state as it might have changed (e.g., ended)
+            current_game_state = context.application.chat_data.get(chat_id, {}).get(RL_GAME_KEY)
+            if current_game_state:
+                 current_game_state['message_id'] = sent_message.message_id
+                 logger.info(f"Sent new roulette state message {sent_message.message_id} in chat {chat_id}. Updated game state.")
+            else:
+                 logger.warning(f"Sent new roulette message {sent_message.message_id} for chat {chat_id}, but game state was missing upon update.")
+
             new_message_sent = True
 
     except BadRequest as e:
@@ -1933,22 +2081,28 @@ async def rl_show_game_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, m
         if "message is not modified" in error_str:
             logger.debug(f"Roulette state message {message_id} not modified.")
         elif "message to edit not found" in error_str or "chat not found" in error_str or "message can't be edited" in error_str:
-             # Edit failed because message is gone/uneditable, try sending new instead
              logger.warning(f"Failed to edit roulette message {message_id} in chat {chat_id} (not found/editable). Forcing send new.")
-             game_state['message_id'] = None # Clear invalid ID
-             # Recursive call to send new message
-             return await rl_show_game_state(context, chat_id, message_text=full_text, edit_existing=False)
+             if game_state: game_state['message_id'] = None # Clear invalid ID from potentially stale state
+             # Recursive call ONLY if we weren't already trying to send new after an edit failure
+             if not edit_failed_and_sending_new:
+                  return await rl_show_game_state(context, chat_id, message_text=full_text, edit_existing=False)
+             else:
+                  logger.error(f"Recursive send new failed in chat {chat_id} after edit failure.")
+                  return None # Avoid infinite recursion
+        elif "message text is empty" in error_str:
+             logger.error(f"Attempted to send empty message to chat {chat_id}. Text: '{full_text}'")
+             return None # Indicate failure
         else:
-            # Other BadRequest error
             logger.error(f"BadRequest showing roulette state for chat {chat_id} (msg {message_id}): {e}")
             return None # Indicate failure
     except Forbidden as e:
-        # Bot blocked or kicked
         logger.error(f"Forbidden error in chat {chat_id} (likely bot kicked/blocked): {e}")
-        # Clean up game state for this chat
-        chat_data.pop(RL_GAME_KEY, None)
-        timer_job = game_state.get('timer_job_name')
+        # Clean up game state and timers for this chat
+        chat_data.pop(RL_GAME_KEY, None) # Use chat_data which is definitely defined here
+        timer_job = game_state.get('timer_job_name') if game_state else None
+        display_timer_job = game_state.get('timer_display_job_name') if game_state else None
         if timer_job: await rl_remove_job_if_exists(timer_job, context)
+        if display_timer_job: await rl_remove_job_if_exists(display_timer_job, context)
         return None
     except Exception as e:
         logger.error(f"Unexpected error showing roulette state for chat {chat_id} (msg {message_id}): {e}", exc_info=True)
@@ -2245,7 +2399,7 @@ async def rl_choose_bet_amount_callback(update: Update, context: ContextTypes.DE
 
 
 async def rl_confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the 'Yes' confirmation button press."""
+    """Handles the 'Yes' confirmation button press and starts timers if first bet."""
     query = update.callback_query
     user = query.from_user
     chat_id = query.message.chat_id
@@ -2327,25 +2481,42 @@ async def rl_confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.answer("✅ Ставка принята!")
     logger.info(f"User {user.id} placed bet in chat {chat_id}: {final_bet}")
 
-    # --- Start Timer if First Bet ---
+    # --- Start Timers if First Bet ---
     current_total_bets = sum(len(bets) for bets in active_bets_by_user.values())
-    timer_job_name = f'rl_spin_timer_{chat_id}'
-    existing_jobs = context.job_queue.get_jobs_by_name(timer_job_name)
+    spin_timer_job_name = f'rl_spin_timer_{chat_id}'
+    display_timer_job_name = f'rl_display_timer_{chat_id}'
+    spin_timer_exists = bool(context.job_queue.get_jobs_by_name(spin_timer_job_name))
+    display_timer_exists = bool(context.job_queue.get_jobs_by_name(display_timer_job_name))
 
-    # Start timer only if it's the very first bet of the round and no timer is running
-    if current_total_bets == 1 and not existing_jobs:
+    # Start timers only if it's the very first bet of the round and timers aren't already running
+    if current_total_bets == 1 and not spin_timer_exists and not display_timer_exists:
+        # Schedule the main one-shot timer to trigger the spin
         context.job_queue.run_once(
             rl_spin_roulette_job,
             RL_BET_TIMER_SECONDS,
-            chat_id=chat_id, # Pass chat_id to job context
-            name=timer_job_name,
-            data={'chat_id': chat_id} # Store data in job context
+            chat_id=chat_id,
+            name=spin_timer_job_name,
+            data={'chat_id': chat_id}
         )
-        game_state['timer_job_name'] = timer_job_name # Store job name in game state
-        logger.info(f"Started roulette timer '{timer_job_name}' for chat {chat_id}")
+        game_state['timer_job_name'] = spin_timer_job_name # Store main timer name
+
+        # Schedule the repeating timer to update the display
+        context.job_queue.run_repeating(
+            rl_update_timer_display_job,
+            interval=RL_TIMER_DISPLAY_UPDATE_INTERVAL,
+            first=0.1, # Start updating quickly
+            chat_id=chat_id,
+            name=display_timer_job_name,
+            data={'chat_id': chat_id, 'main_timer_job_name': spin_timer_job_name}
+        )
+        game_state['timer_display_job_name'] = display_timer_job_name # Store display timer name
+
+        logger.info(f"Started roulette timers for chat {chat_id}: Spin='{spin_timer_job_name}', Display='{display_timer_job_name}'")
+    # *** END MODIFIED SECTION ***
 
     # --- Update Game Display ---
     # Show the main game state again, now including the new bet and possibly timer info
+    # The timer text will now be fetched correctly by rl_show_game_state
     await rl_show_game_state(context, chat_id, message_text=None, edit_existing=True)
 
 
@@ -2436,20 +2607,35 @@ async def rl_spin_roulette_logic(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         return
 
     # Prevent starting spin if not in correct state or already spinning
-    if game_state.get('state') not in ['accepting_bets', 'spinning']:
-        logger.warning(f"Spin logic called for chat {chat_id} but state is '{game_state.get('state')}'. Aborting spin.")
+    # Allow spin if state is 'accepting_bets' (triggered by timer/button)
+    if game_state.get('state') != 'accepting_bets':
+        if game_state.get('state') == 'spinning':
+            logger.warning(f"Spin logic called again for chat {chat_id} while already spinning. Ignoring.")
+        else:
+             logger.warning(f"Spin logic called for chat {chat_id} but state is '{game_state.get('state')}'. Aborting spin.")
         return
 
     # Make a copy of bets to process, as game_state might change
     active_bets_by_user = dict(game_state.get('active_bets', {})) # Use dict() for a shallow copy
 
-    # Check if there are actually any bets (could happen if spin triggered manually with no bets)
-    if not active_bets_by_user and game_state.get('state') == 'accepting_bets':
+    # Check if there are actually any bets
+    if not active_bets_by_user:
         logger.warning(f"Spin logic called for chat {chat_id} but no bets found.")
         game_state['state'] = 'idle' # Reset state
+        # Clean up any lingering timers if somehow spin was triggered with no bets
+        spin_timer_name = game_state.pop('timer_job_name', None)
+        display_timer_name = game_state.pop('timer_display_job_name', None)
+        if spin_timer_name: await rl_remove_job_if_exists(spin_timer_name, context)
+        if display_timer_name: await rl_remove_job_if_exists(display_timer_name, context)
+
         msg_id = game_state.get('message_id')
         if msg_id:
-            try: await bot.edit_message_text(chat_id, msg_id, "Ставок не было, раунд завершен.\nИспользуйте /roulette для старта.", reply_markup=None)
+            try:
+                final_reply_markup = rl_get_main_menu_keyboard(chat_data, {})
+                await bot.edit_message_text(
+                    chat_id, msg_id,
+                    "Ставок не было, раунд завершен.\nИспользуйте 'Начать новый раунд' ниже.",
+                    reply_markup=final_reply_markup)
             except Exception: pass
         return
 
@@ -2458,19 +2644,26 @@ async def rl_spin_roulette_logic(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         logger.error(f"Cannot spin roulette in chat {chat_id}, message_id is missing.")
         try: await bot.send_message(chat_id, "❌ Ошибка: Не найдено сообщение для отображения спина!")
         except Exception: pass
-        chat_data.pop(RL_GAME_KEY, None) # Clean up broken game state
+        # Clean up broken game state and timers
+        spin_timer_name = game_state.pop('timer_job_name', None) if game_state else None
+        display_timer_name = game_state.pop('timer_display_job_name', None) if game_state else None
+        chat_data.pop(RL_GAME_KEY, None)
+        if spin_timer_name: await rl_remove_job_if_exists(spin_timer_name, context)
+        if display_timer_name: await rl_remove_job_if_exists(display_timer_name, context)
         return
 
-    # Prevent double spins if called concurrently
-    if game_state.get('state') == 'spinning':
-        logger.warning(f"Spin logic called again for chat {chat_id} while already spinning. Ignoring.")
-        return
-
-    # --- Set State to Spinning & Clean Timer ---
+    # --- Set State to Spinning & Clean Timers ---
     game_state['state'] = 'spinning'
-    timer_job_name = game_state.pop('timer_job_name', None) # Remove timer name
-    if timer_job_name:
-        await rl_remove_job_if_exists(timer_job_name, context) # Ensure timer job is cancelled
+    spin_timer_name = game_state.pop('timer_job_name', None) # Remove main timer name
+    display_timer_name = game_state.pop('timer_display_job_name', None) # Remove display timer name
+
+    if spin_timer_name:
+        await rl_remove_job_if_exists(spin_timer_name, context) # Ensure main timer job is cancelled
+        logger.debug(f"Removed spin timer '{spin_timer_name}' before animation start in chat {chat_id}")
+    if display_timer_name:
+        await rl_remove_job_if_exists(display_timer_name, context) # Ensure display timer job is cancelled
+        logger.debug(f"Removed display timer '{display_timer_name}' before animation start in chat {chat_id}")
+    # *** END MODIFIED SECTION ***
 
     # --- Determine Winning Number ---
     winning_number_str = random.choice(AMERICAN_WHEEL_ORDER)
@@ -2500,7 +2693,7 @@ async def rl_spin_roulette_logic(context: ContextTypes.DEFAULT_TYPE, chat_id: in
 
     # --- Run Animation ---
     try:
-        # Initial "spinning" message update
+        # Initial "spinning" message update (remove keyboard)
         await bot.edit_message_text(
             "🎰 <b>Колесо вращается...</b>",
             chat_id=chat_id, message_id=message_id, reply_markup=None, parse_mode=ParseMode.HTML
@@ -2550,7 +2743,7 @@ async def rl_spin_roulette_logic(context: ContextTypes.DEFAULT_TYPE, chat_id: in
                     # Budget time for the next update
                     next_update_time_budget = current_mono_time + update_interval
                 except BadRequest as e:
-                    if "Message is not modified" in str(e): pass # Ignore benign error
+                    if "Message is not modified" in str(e).lower(): pass # Ignore benign error
                     else:
                         logger.warning(f"BadRequest editing animation chat {chat_id} (step {steps_taken}): {e}")
                         animation_successful = False; break # Stop animation on error
@@ -2694,17 +2887,20 @@ async def rl_spin_roulette_logic(context: ContextTypes.DEFAULT_TYPE, chat_id: in
     # --- Construct Final Message ---
     final_color_char = rl_get_color(winning_number_str)
     final_color_emoji = "🟢" if final_color_char == 'Green' else ("🔴" if final_color_char == 'Red' else "⚫")
+    timestamp = datetime.datetime.now().strftime("%H:%M") # Add timestamp to result
     result_header = f"🎉 Выпало: <b>{final_color_emoji} {winning_number_str}</b> 🎉\n"
-    result_summary = f"\n<b>Общий итог раунда: {total_net_change:+.2f} F</b>"
+    result_summary = f"\n\n<b>Общий итог раунда: {total_net_change:+.2f} F</b>    {timestamp}" # Added timestamp
     full_result_text = result_header + "\n".join(result_lines) + result_summary
 
     # --- Reset Game State ---
     # Important: access chat_data again in case it was modified elsewhere concurrently
-    current_game_state = context.application.chat_data.get(chat_id, {}).get(RL_GAME_KEY)
+    current_chat_data = context.application.chat_data.get(chat_id, {})
+    current_game_state = current_chat_data.get(RL_GAME_KEY)
     if current_game_state:
-        current_game_state['state'] = 'idle' # Or 'finished'
+        current_game_state['state'] = 'finished' # Set state to finished/idle
         current_game_state['active_bets'] = {} # Clear bets
-        current_game_state['timer_job_name'] = None # Clear timer name
+        current_game_state['timer_job_name'] = None # Ensure cleared
+        current_game_state['timer_display_job_name'] = None # Ensure cleared
     else:
         # Should not happen ideally
         logger.warning(f"Game state for chat {chat_id} disappeared before state reset in spin logic.")
@@ -2842,7 +3038,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
             if action == "bet" and arg:
                 # Handle bet selection
-                await q.answer(f"Ставка (BJ): {arg} F") # Optional quick feedback
+                # await q.answer(f"Ставка (BJ): {arg} F") # Removed answer here, handled in handle_bet
                 await blackjack_handle_bet(update, context, int(arg))
             elif action == "new" and arg == "game":
                 # Handle 'New Game' button
@@ -2879,6 +3075,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 await rl_spin_callback(update, context)
             elif data == "rl_show_help":
                 await rl_show_help_callback(update, context)
+            elif data == "rl_new_round": # <<< ADDED
+                await rl_new_round_callback(update, context)
             elif data == "rl_noop": # Handle non-clickable buttons
                 await rl_noop_callback(update, context)
             else:
@@ -2892,33 +3090,30 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     # --- Error Handling for Callbacks ---
     except ValueError as e:
-        # Likely int() conversion failed
         logger.error(f"Callback ValueError (likely int conversion) for '{data}' user {u.id}: {e}")
         try: await q.answer("Ошибка: Неверный формат данных.", show_alert=True)
         except Exception: pass
     except BadRequest as e:
         error_str = str(e).lower()
-        logger.warning(f"Callback BadRequest for '{data}' user {u.id}: {e}")
-        # Ignore common, benign errors
         if "query is too old" in error_str:
+             logger.debug(f"Ignoring too old callback query for user {u.id}")
              pass # User clicked an old button, nothing we can do
         elif "message is not modified" in error_str:
+            logger.debug(f"Callback resulted in 'Message is not modified' for user {u.id}")
             pass # Edit resulted in no change, not really an error
         elif "message to edit not found" in error_str:
-            # The message the button was attached to is gone
-            try: await q.answer("Сообщение игры было удалено.", show_alert=False)
+            logger.warning(f"Callback failed: 'Message to edit not found' for user {u.id}. Data: {data}")
+            try: await q.answer("Сообщение игры было удалено или изменено.", show_alert=False)
             except Exception: pass
         else:
-            # Other BadRequest, inform user if possible
+            logger.warning(f"Callback BadRequest for '{data}' user {u.id}: {e}")
             try: await q.answer("Произошла ошибка при обработке.", show_alert=True)
             except Exception: pass
     except Forbidden as e:
-        # Bot lacks permissions
-        logger.error(f"Callback Forbidden error for user {u.id} in chat {chat.id} (likely blocked bot): {e}")
+        logger.error(f"Callback Forbidden error for user {u.id} in chat {chat.id}: {e}")
         try: await q.answer("Ошибка: Бот не имеет прав в этом чате.", show_alert=True)
         except Exception: pass
     except Exception as e:
-        # Catch-all for unexpected errors
         logger.error(f"Callback general error for '{data}' user {u.id}: {e}", exc_info=True)
         try: await q.answer("Произошла внутренняя ошибка.", show_alert=True)
         except Exception: pass
