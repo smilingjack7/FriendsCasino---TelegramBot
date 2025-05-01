@@ -11,21 +11,34 @@ from threading import Thread
 from flask import Flask
 from html import escape as html_escape
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, Message
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    CallbackQueryHandler,
-    MessageHandler,
-    filters,
-    ConversationHandler # Not used directly, but concepts remain
-)
-from telegram.constants import ParseMode, ChatType
-from telegram.error import BadRequest, Conflict, Forbidden
+# Ensure telegram modules are imported correctly
+try:
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, Message
+    from telegram.ext import (
+        Application,
+        CommandHandler,
+        ContextTypes,
+        CallbackQueryHandler,
+        MessageHandler,
+        filters,
+        # ConversationHandler is not used, so it's technically optional here
+    )
+    from telegram.constants import ParseMode, ChatType
+    from telegram.error import BadRequest, Conflict, Forbidden
+except ImportError as e:
+    print(f"Error importing telegram library: {e}")
+    print("Please ensure 'python-telegram-bot' is installed correctly.")
+    exit(1)
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
+# Ensure psycopg2 is imported correctly
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError as e:
+    print(f"Error importing psycopg2: {e}")
+    print("Please ensure 'psycopg2-binary' or 'psycopg2' is installed.")
+    exit(1)
+
 from urllib.parse import urlparse
 
 # --- Constants and Configuration ---
@@ -41,25 +54,25 @@ if not DATABASE_URL:
 INITIAL_BALANCE = 100.0
 BONUS_AMOUNT = 10.0
 BONUS_COOLDOWN_HOURS = 6
-NUM_DECKS = 8 # <<< Number of decks used
+NUM_DECKS = 8  # Number of decks used
 DEALER_HITS_SOFT_17 = True
 BLACKJACK_PAYOUT = 1.5
-MAX_SPLITS = 3
-DEALER_TURN_DELAY = 0.7
+MAX_SPLITS = 3  # Max number of hands after splitting (original + 3 splits = 4 hands)
+DEALER_TURN_DELAY = 0.7  # Seconds between dealer actions/reveals
 LEADERBOARD_LIMIT = 10
-BJ_GAME_KEY = 'blackjack_game' # Key for user_data
+BJ_GAME_KEY = 'blackjack_game'  # Key for user_data
 # Penetration: Shuffle when deck reaches this percentage or lower
-BJ_SHUFFLE_PERCENTAGE = 0.60 # Shuffle when 60% or less remains
+BJ_SHUFFLE_PERCENTAGE = 0.60  # Shuffle when 60% or less remains
 
-# --- Roulette Constants (Imported & Adapted) ---
+# --- Roulette Constants ---
 RL_BET_AMOUNTS = [10, 25, 50, 100, 250, 500]
 RL_MAX_BETS_PER_ROUND = 10
 RL_MAX_BETS_PER_USER = 3
 RL_BET_TIMER_SECONDS = 45
 RL_SPIN_ANIMATION_DURATION = 8.0
-RL_GAME_KEY = 'roulette_game'
-RL_USER_TEMP_BET_KEY = 'roulette_temp_bet'
-RL_TIMER_DISPLAY_UPDATE_INTERVAL = 2.0 # How often to update the timer text (seconds)
+RL_GAME_KEY = 'roulette_game' # Key for chat_data
+RL_USER_TEMP_BET_KEY = 'roulette_temp_bet' # Key for user_data (during bet creation)
+RL_TIMER_DISPLAY_UPDATE_INTERVAL = 2.0  # How often to update the timer text (seconds)
 AMERICAN_WHEEL_ORDER = [
     '0', '28', '9', '26', '30', '11', '7', '20', '32', '17', '5', '22', '34',
     '15', '3', '24', '36', '13', '1', '00', '27', '10', '25', '29', '12', '8',
@@ -68,31 +81,48 @@ AMERICAN_WHEEL_ORDER = [
 RL_WHEEL_SIZE = len(AMERICAN_WHEEL_ORDER)
 RL_RED_NUMBERS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
 RL_BLACK_NUMBERS = {2, 4, 6, 8, 10, 11, 13, 15, 17, 20, 22, 24, 26, 28, 29, 31, 33, 35}
-RL_DOZENS = { '1st': set(range(1, 13)), '2nd': set(range(13, 25)), '3rd': set(range(25, 37)) }
-RL_COLUMNS = { 'col1': {1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34}, 'col2': {2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35}, 'col3': {3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36} }
-RL_PAYOUTS = { 'number': 35, 'color': 1, 'parity': 1, 'dozen': 2, 'column': 2 }
-RL_BET_VALUE_DISPLAY_NAMES = { 'Red': '🔴 Красное', 'Black': '⚫ Черное', 'Even': '⚖️ Четное', 'Odd': '❓ Нечетное', '1st': '1️⃣ Дюж. 1-12', '2nd': '2️⃣ Дюж. 13-24', '3rd': '3️⃣ Дюж. 25-36', 'col1': '📊 Кол. 1', 'col2': '📊 Кол. 2', 'col3': '📊 Кол. 3' }
+RL_DOZENS = {'1st': set(range(1, 13)), '2nd': set(range(13, 25)), '3rd': set(range(25, 37))}
+RL_COLUMNS = {
+    'col1': {1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34},
+    'col2': {2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35},
+    'col3': {3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36}
+}
+RL_PAYOUTS = {'number': 35, 'color': 1, 'parity': 1, 'dozen': 2, 'column': 2}
+RL_BET_VALUE_DISPLAY_NAMES = {
+    'Red': '🔴 Красное', 'Black': '⚫ Черное',
+    'Even': '⚖️ Четное', 'Odd': '❓ Нечетное',
+    '1st': '1️⃣ Дюж. 1-12', '2nd': '2️⃣ Дюж. 13-24', '3rd': '3️⃣ Дюж. 25-36',
+    'col1': '📊 Кол. 1', 'col2': '📊 Кол. 2', 'col3': '📊 Кол. 3'
+}
+# Using a set for faster 'in' checks
 RL_AMERICAN_WHEEL_SET = set(AMERICAN_WHEEL_ORDER)
 
 
 # --- Logging Setup ---
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+# Reduce verbosity from libraries
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.INFO)
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # --- Web Server for Keep-Alive ---
-keep_alive_app = Flask('')
+keep_alive_app = Flask(__name__) # Use __name__
 @keep_alive_app.route('/')
 def keep_alive_home():
     return "Bot is alive!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
+    # Suppress Werkzeug's startup messages unless it's an error
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
+    # use_reloader=False is important when running inside threads/other environments
     keep_alive_app.run(host='0.0.0.0', port=port, use_reloader=False)
 
 def start_keep_alive():
+    # Daemon=True ensures the thread exits when the main program does
     t = Thread(target=run_web_server, daemon=True)
     t.start()
     logger.info("Keep-alive web server started.")
@@ -104,257 +134,373 @@ RANK_VALUES = {"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,"T":10,"J":10,"Q"
 
 # --- Database Interaction ---
 def get_db_conn():
+    """Establishes a database connection."""
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        conn.autocommit = True
+        conn.autocommit = True # Set autocommit for simplicity
         return conn
-    except Exception as e:
+    except psycopg2.Error as e:
         logger.error(f"DB connection error: {e}")
-        raise
+        raise # Re-raise the exception to signal failure
 
 def get_or_create_user(user_id: int) -> dict | None:
+    """Fetches user data or creates a new user with initial balance. Returns dict or None on error."""
     sql_s = "SELECT user_id, balance, last_bonus FROM users WHERE user_id = %s;"
-    sql_i = "INSERT INTO users (user_id, balance, last_bonus) VALUES (%s, %s, NULL) ON CONFLICT (user_id) DO NOTHING;"
+    sql_i = """
+        INSERT INTO users (user_id, balance, last_bonus)
+        VALUES (%s, %s, NULL)
+        ON CONFLICT (user_id) DO NOTHING;
+    """
     try:
         with get_db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql_s, (user_id,))
             data = cur.fetchone()
+
             if not data:
+                # Attempt to create user
                 cur.execute(sql_i, (user_id, INITIAL_BALANCE))
-                logger.info(f"New user created: {user_id}")
+                # Fetch again after potential insert
                 cur.execute(sql_s, (user_id,))
-                # Ensure data is fetched after potential creation or handle potential None
-                data = cur.fetchone() or {'user_id': user_id, 'balance': INITIAL_BALANCE, 'last_bonus': None}
+                data = cur.fetchone()
+                if data:
+                    logger.info(f"New user created: {user_id}")
+                else:
+                    # This case should be rare (e.g., conflict happened but fetch failed)
+                    logger.error(f"Failed to create or fetch user after insert attempt for user_id: {user_id}")
+                    return None # Indicate failure
 
-        # Post-fetch type check and conversion for last_bonus
-        if data and data.get('last_bonus'):
-            if isinstance(data['last_bonus'], str):
-                try:
-                    # Handle potential timezone info if present
-                    if data['last_bonus'].endswith('Z'):
-                         data['last_bonus'] = data['last_bonus'].replace('Z', '+00:00')
-                    elif '+' not in data['last_bonus'] and '.' in data['last_bonus']:
-                         # Add timezone if it looks like naive ISO format from older psycopg2/python
-                         data['last_bonus'] += '+00:00'
-                    parsed_dt = datetime.datetime.fromisoformat(data['last_bonus'])
-                    # Ensure UTC
-                    data['last_bonus'] = parsed_dt.astimezone(datetime.timezone.utc)
+            # --- Data Type Validation and Conversion ---
+            if data:
+                # Validate/Convert last_bonus to timezone-aware UTC datetime
+                if data.get('last_bonus'):
+                    bonus_time = data['last_bonus']
+                    if isinstance(bonus_time, str):
+                        try:
+                            # Handle different ISO formats, ensure UTC
+                            if bonus_time.endswith('Z'): bonus_time = bonus_time.replace('Z', '+00:00')
+                            # Handle formats without timezone info (assume UTC if possible)
+                            elif '+' not in bonus_time and '.' in bonus_time: bonus_time += '+00:00'
+                            parsed_dt = datetime.datetime.fromisoformat(bonus_time)
+                            # Ensure timezone-aware and UTC
+                            if parsed_dt.tzinfo is None:
+                                data['last_bonus'] = parsed_dt.replace(tzinfo=datetime.timezone.utc)
+                            else:
+                                data['last_bonus'] = parsed_dt.astimezone(datetime.timezone.utc)
+                        except ValueError:
+                            logger.warning(f"Could not parse last_bonus string '{data['last_bonus']}' for user {user_id}. Resetting.")
+                            data['last_bonus'] = None
+                    elif isinstance(bonus_time, datetime.datetime):
+                        # Ensure timezone-aware and UTC
+                        if bonus_time.tzinfo is None:
+                            data['last_bonus'] = bonus_time.replace(tzinfo=datetime.timezone.utc)
+                        else:
+                            data['last_bonus'] = bonus_time.astimezone(datetime.timezone.utc)
+                    else:
+                        logger.warning(f"Invalid last_bonus type for user {user_id}: {type(bonus_time)}. Resetting.")
+                        data['last_bonus'] = None
 
-                except ValueError:
-                     logger.warning(f"Could not parse last_bonus string '{data['last_bonus']}' for user {user_id}. Resetting.")
-                     data['last_bonus'] = None
-            elif not isinstance(data['last_bonus'], datetime.datetime):
-                 logger.warning(f"Invalid last_bonus type for user {user_id}: {type(data['last_bonus'])}. Resetting.")
-                 data['last_bonus'] = None
-            elif data['last_bonus'].tzinfo is None:
-                 # Add UTC timezone if naive
-                 data['last_bonus'] = data['last_bonus'].replace(tzinfo=datetime.timezone.utc)
-            else:
-                 # Ensure it's UTC if already timezone-aware
-                 data['last_bonus'] = data['last_bonus'].astimezone(datetime.timezone.utc)
+                # Validate/Convert balance to float
+                if data.get('balance') is not None:
+                    try:
+                        data['balance'] = float(data['balance'])
+                    except (ValueError, TypeError):
+                        logger.error(f"Could not convert DB balance '{data['balance']}' to float for user {user_id}. Setting to 0.")
+                        data['balance'] = 0.0
+                else:
+                    # Handle case where balance is NULL in DB (shouldn't happen with default)
+                    logger.warning(f"User {user_id} has NULL balance in DB. Setting to 0.")
+                    data['balance'] = 0.0
 
-        return data
-    except Exception as e:
+            return data # Return the processed dictionary
+
+    except psycopg2.Error as e:
         logger.error(f"DB Error (get_or_create_user) for {user_id}: {e}", exc_info=True)
+        return None
+    except Exception as e: # Catch other potential errors
+        logger.error(f"Unexpected Error (get_or_create_user) for {user_id}: {e}", exc_info=True)
         return None
 
 def update_balance(user_id: int, change: float) -> float | None:
-    # Ensure user exists first
-    if not get_or_create_user(user_id):
-        logger.error(f"Attempted balance update for non-existent user {user_id}")
+    """Updates user balance by 'change' amount. Returns new balance or None on error/failure."""
+    # Ensure user exists (or try to create) before attempting update
+    # Note: This adds a SELECT before UPDATE, could be optimized if strictly necessary
+    # but safer to ensure user record exists.
+    if get_or_create_user(user_id) is None:
+        logger.error(f"Attempted balance update for non-existent or problematic user {user_id}")
         return None
 
     sql = "UPDATE users SET balance = balance + %s WHERE user_id = %s RETURNING balance;"
     try:
         with get_db_conn() as conn, conn.cursor() as cur:
-            cur.execute(sql, (change, user_id,))
+            cur.execute(sql, (change, user_id))
             res = cur.fetchone()
-            if res:
-                new_balance = res[0]
+            if res and res[0] is not None:
+                new_balance = float(res[0])
                 logger.info(f"Balance updated for {user_id}: {change:+.2f}. New balance: {new_balance:.2f}")
-                # Ensure float conversion for safety
-                return float(new_balance) if new_balance is not None else None
+                return new_balance
             else:
+                # This could happen if the user_id was somehow deleted between get_or_create and update
                 logger.warning(f"Update balance failed for user {user_id} (user not found or other issue after creation check)")
                 return None
     except psycopg2.errors.CheckViolation as e:
-         logger.warning(f"Balance update rejected for user {user_id}: {e} (Likely negative balance attempt)")
-         return None
-    except Exception as e:
-        logger.error(f"DB Error (update_balance) for {user_id}: {e}", exc_info=True)
+        # Catch potential negative balance constraint violation
+        logger.warning(f"Balance update rejected for user {user_id}: {e} (Likely negative balance attempt: {change})")
+        # Optionally, fetch current balance to return it if needed, otherwise return None
+        return get_balance(user_id) # Return current balance instead of None
+    except (psycopg2.Error, ValueError, TypeError) as e: # Catch DB errors and potential type errors
+        logger.error(f"DB/Type Error (update_balance) for {user_id}: {e}", exc_info=True)
         return None
 
 def get_balance(user_id: int) -> float | None:
+    """Gets the current balance for a user."""
     user_data = get_or_create_user(user_id)
-    balance = user_data.get('balance') if user_data else None
-    try:
-        return float(balance) if balance is not None else None
-    except (ValueError, TypeError):
-        logger.error(f"Could not convert balance '{balance}' to float for user {user_id}")
-        return None
+    # Ensure balance is float, fallback to None if user_data is None or balance missing
+    return user_data['balance'] if user_data and 'balance' in user_data else None
 
-
-def update_last_bonus_time(user_id: int, ts_utc: datetime.datetime):
+def update_last_bonus_time(user_id: int, ts_utc: datetime.datetime | None):
+    """Updates the last bonus timestamp in the database."""
     sql = "UPDATE users SET last_bonus = %s WHERE user_id = %s;"
-    # Ensure it's UTC and naive for PostgreSQL timestamp without timezone
-    ts_naive_utc = ts_utc.astimezone(datetime.timezone.utc).replace(tzinfo=None) if ts_utc else None
+    # Convert to naive UTC timestamp for storage, or use NULL if ts_utc is None
+    db_timestamp = ts_utc.astimezone(datetime.timezone.utc).replace(tzinfo=None) if ts_utc else None
     try:
         with get_db_conn() as conn, conn.cursor() as cur:
-            cur.execute(sql, (ts_naive_utc, user_id))
-            logger.info(f"Bonus timestamp updated for {user_id} to {ts_naive_utc}")
-    except Exception as e:
+            cur.execute(sql, (db_timestamp, user_id))
+            logger.info(f"Bonus timestamp updated for {user_id} to {db_timestamp}")
+    except psycopg2.Error as e:
         logger.error(f"DB Error (update_last_bonus_time) for {user_id}: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected Error (update_last_bonus_time) for {user_id}: {e}", exc_info=True)
 
 def get_last_bonus_time(user_id: int) -> datetime.datetime | None:
+    """Gets the last bonus time (as timezone-aware UTC datetime) for a user."""
     user_data = get_or_create_user(user_id)
-    last_bonus = user_data.get('last_bonus') if user_data else None
-
-    # The get_or_create_user function already handles parsing and timezone conversion
-    return last_bonus # Should be a timezone-aware UTC datetime or None
+    # 'last_bonus' should be timezone-aware UTC or None after processing in get_or_create_user
+    return user_data.get('last_bonus') if user_data else None
 
 def get_leaderboard(limit: int = LEADERBOARD_LIMIT) -> list[dict]:
+    """Fetches the top users by balance."""
+    # Filter out users with zero or negative balance explicitly in SQL
     sql = "SELECT user_id, balance FROM users WHERE balance > 0 ORDER BY balance DESC LIMIT %s;"
+    leaders = []
     try:
         with get_db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, (limit,))
-            # Ensure balance is float
             leaders = cur.fetchall()
+            # Ensure balance is float in the returned list
             for leader in leaders:
                 if leader.get('balance') is not None:
                     try:
                         leader['balance'] = float(leader['balance'])
                     except (ValueError, TypeError):
-                         logger.error(f"Could not convert leaderboard balance '{leader['balance']}' to float for user {leader.get('user_id')}")
-                         leader['balance'] = 0.0 # Or handle as error / remove entry
-            return leaders
-    except Exception as e:
+                        logger.error(f"Could not convert leaderboard balance '{leader['balance']}' to float for user {leader.get('user_id')}")
+                        leader['balance'] = 0.0 # Fallback to 0.0
+                else:
+                    leader['balance'] = 0.0 # Handle NULL balance case
+
+            return leaders # Return list of dicts
+    except psycopg2.Error as e:
         logger.error(f"DB Error (get_leaderboard): {e}", exc_info=True)
+        return [] # Return empty list on error
+    except Exception as e:
+        logger.error(f"Unexpected Error (get_leaderboard): {e}", exc_info=True)
         return []
 
 # --- Blackjack Game Utilities ---
-def create_deck(num=NUM_DECKS) -> list:
+def create_deck(num: int = NUM_DECKS) -> list[tuple[str, str]]:
+    """Creates and shuffles a standard deck of cards."""
+    if num <= 0: num = 1 # Ensure at least one deck
+    # Use tuple for cards: (rank, suit)
     deck = [(r, s) for _ in range(num) for s in SUITS for r in RANKS]
     random.shuffle(deck)
     return deck
 
-def get_card_value(card: tuple | None) -> int:
-    return RANK_VALUES.get(card[0], 0) if card else 0
+def get_card_value(card: tuple[str, str] | None) -> int:
+    """Gets the numerical value of a card."""
+    # Return 0 if card is None
+    return RANK_VALUES.get(card[0], 0) if card and len(card) > 0 else 0
 
-def get_hand_value(hand: list) -> int:
-    value = sum(get_card_value(card) for card in hand if card)
-    num_aces = sum(1 for card in hand if card and card[0] == 'A')
+def get_hand_value(hand: list[tuple[str, str] | None]) -> int:
+    """Calculates the value of a hand in Blackjack."""
+    value = 0
+    num_aces = 0
+    if not hand: return 0
+
+    for card in hand:
+        if card: # Check if card is not None
+            value += get_card_value(card)
+            if card[0] == 'A':
+                num_aces += 1
+
+    # Adjust for Aces
     while value > 21 and num_aces > 0:
         value -= 10
         num_aces -= 1
     return value
 
-def format_hand(hand: list, hide_one: bool = False) -> str:
+def format_hand(hand: list[tuple[str, str] | None], hide_one: bool = False) -> str:
+    """Formats a hand for display, optionally hiding the second card."""
     if not hand:
         return "Пусто"
-    if hide_one and len(hand) > 1:
-        first_card = f"{hand[0][0]}{hand[0][1]}" if hand[0] else "??"
-        return f"[{first_card}, ??]"
-    return ", ".join([f"{card[0]}{card[1]}" for card in hand if card])
 
-def draw_card(deck: list) -> tuple | None:
+    # Ensure cards are valid before formatting
+    valid_cards = [card for card in hand if card and len(card) == 2]
+
+    if not valid_cards:
+        return "Пусто (ошибка карт)" # Indicate if hand contained invalid items
+
+    if hide_one and len(valid_cards) > 1:
+        # Show first card, hide the rest effectively
+        first_card = f"{valid_cards[0][0]}{valid_cards[0][1]}"
+        return f"[{first_card}, ??]"
+    elif hide_one and len(valid_cards) == 1:
+         # If hide_one is true but only one card, show it and indicate hidden
+        return f"[{valid_cards[0][0]}{valid_cards[0][1]}, ??]"
+    elif hide_one: # hide_one is true, but hand was empty after validation
+         return "[??, ??]"
+    else:
+        # Default: format all valid cards
+        return ", ".join([f"{card[0]}{card[1]}" for card in valid_cards])
+
+
+def draw_card(deck: list[tuple[str, str]]) -> tuple[str, str] | None:
+    """Draws a single card from the deck (removes it). Uses simple pop after initial shuffle."""
     if not deck:
         logger.warning("Attempted to draw from an empty deck.")
         return None
     try:
-        return deck.pop(random.randrange(len(deck)))
-    except (ValueError, IndexError) as e:
-        logger.error(f"Error drawing card: {e}")
+        # Efficient way to draw after random.shuffle()
+        return deck.pop()
+    except IndexError:
+        # Should be caught by the 'if not deck' but as a safeguard
+        logger.error("Error drawing card: Deck unexpectedly empty (IndexError).")
         return None
+    except Exception as e:
+        logger.error(f"Unexpected error drawing card: {e}", exc_info=True)
+        return None
+
 
 # --- Roulette Game Utilities ---
-def rl_get_value_display_name(bet_type, bet_value):
+def rl_get_value_display_name(bet_type: str, bet_value: str | int) -> str:
+    """Gets the user-friendly display name for a bet value."""
     if bet_type == 'number':
-        return f"🔢 {bet_value}"
-    return RL_BET_VALUE_DISPLAY_NAMES.get(bet_value, bet_value)
+        # Handle potential int input for numbers if needed, ensure string for display
+        return f"🔢 {str(bet_value)}"
+    # Use .get with a default fallback to the value itself if not in the dict
+    return RL_BET_VALUE_DISPLAY_NAMES.get(str(bet_value), str(bet_value))
 
-def rl_get_color(n_str):
-    if n_str in ['0', '00']:
-        return 'Green'
+def rl_get_color(n_str: str) -> str | None:
+    """Determines the color of a roulette number string."""
+    if n_str in ['0', '00']: return 'Green'
     try:
         n = int(n_str)
-        return 'Red' if n in RL_RED_NUMBERS else ('Black' if n in RL_BLACK_NUMBERS else None)
-    except ValueError:
-        return None
+        if n in RL_RED_NUMBERS: return 'Red'
+        if n in RL_BLACK_NUMBERS: return 'Black'
+        return None # Number out of range 1-36
+    except (ValueError, TypeError):
+        return None # Not a valid number string
 
-def rl_is_even_or_odd(n_str):
-    if n_str in ['0', '00']:
-        return None
+def rl_is_even_or_odd(n_str: str) -> str | None:
+    """Determines if a roulette number string is Even or Odd."""
+    if n_str in ['0', '00']: return None
     try:
         return 'Even' if int(n_str) % 2 == 0 else 'Odd'
-    except ValueError:
+    except (ValueError, TypeError):
         return None
 
-def rl_get_dozen(n_str):
-    if n_str in ['0', '00']:
-        return None
+def rl_get_dozen(n_str: str) -> str | None:
+    """Determines the dozen (1st, 2nd, 3rd) of a roulette number string."""
+    if n_str in ['0', '00']: return None
     try:
         n = int(n_str)
+        # Use next with a generator expression for clarity
         return next((name for name, d_set in RL_DOZENS.items() if n in d_set), None)
-    except ValueError:
+    except (ValueError, TypeError):
         return None
 
-def rl_get_column(n_str):
-    if n_str in ['0', '00']:
-        return None
+def rl_get_column(n_str: str) -> str | None:
+    """Determines the column (col1, col2, col3) of a roulette number string."""
+    if n_str in ['0', '00']: return None
     try:
         n = int(n_str)
         return next((name for name, c_set in RL_COLUMNS.items() if n in c_set), None)
-    except ValueError:
+    except (ValueError, TypeError):
         return None
 
 # --- Helper to get User Mention (HTML) & Display Name ---
 _user_mention_cache = {}
-_cache_lock = asyncio.Lock()
-_cache_ttl = 3600 # Cache for 1 hour
+_cache_lock = asyncio.Lock() # Use asyncio Lock for async context
+_cache_ttl = 3600  # Cache for 1 hour
 
 async def get_user_mention(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> tuple[str, str]:
+    """
+    Fetches user's HTML mention and display name, using a timed cache.
+    Returns (html_mention, display_name). Escapes display name.
+    """
     now = time.monotonic()
     default_display_name = f"User_{user_id}"
-    default_html_mention = default_display_name # Fallback if get_chat fails
+    # Default mention should be safe HTML (just the default name)
+    default_html_mention = html_escape(default_display_name)
 
-    # Check cache first
     async with _cache_lock:
         cached = _user_mention_cache.get(user_id)
         if cached and (now - cached['ts']) < _cache_ttl:
+            # Ensure both parts are in cache before returning
             if 'html_mention' in cached and 'display_name' in cached:
                 return cached['html_mention'], cached['display_name']
+            else:
+                 # Cache entry is incomplete, treat as miss
+                 logger.debug(f"Incomplete cache entry for user {user_id}. Refetching.")
 
-    # If not in cache or expired, fetch from Telegram
+    # --- Cache miss or expired ---
     display_name = default_display_name
     html_mention = default_html_mention
     try:
+        # Use context.bot which is readily available
         user_chat = await context.bot.get_chat(user_id)
-        html_mention = user_chat.mention_html()
-        if user_chat.first_name:
-            display_name = user_chat.first_name
-        elif user_chat.username:
-            display_name = f"@{user_chat.username}"
-        if display_name != default_display_name:
-            display_name = html_escape(display_name)
+        if isinstance(user_chat, User): # Check if it's a user object
+             html_mention = user_chat.mention_html() # Safe HTML mention
+             # Construct display name carefully
+             name_parts = [user_chat.first_name, user_chat.last_name]
+             full_name = " ".join(filter(None, name_parts)).strip() # Join non-empty parts
+             if full_name:
+                 display_name = full_name
+             elif user_chat.username:
+                 # Use username as fallback if full name is empty
+                 display_name = f"@{user_chat.username}"
+             # Escape the constructed display name for safety in HTML contexts elsewhere
+             if display_name != default_display_name:
+                 display_name = html_escape(display_name)
+        else:
+             logger.warning(f"get_chat({user_id}) returned type {type(user_chat)}, expected User.")
 
     except (BadRequest, Forbidden) as e:
+        # Common errors when bot can't access user info
         logger.warning(f"Could not get chat for user {user_id}: {e}")
     except Exception as e:
-        logger.warning(f"Failed to get mention/name for {user_id}: {e}")
+        # Catch any other unexpected errors during get_chat
+        logger.warning(f"Failed to get mention/name for {user_id}: {e}", exc_info=True)
 
     # Update cache
     async with _cache_lock:
-        _user_mention_cache[user_id] = {'html_mention': html_mention, 'display_name': display_name, 'ts': now}
+        _user_mention_cache[user_id] = {
+            'html_mention': html_mention,
+            'display_name': display_name,
+            'ts': now
+        }
 
     return html_mention, display_name
 
 # --- Core Bot Commands ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /start command."""
+    if not update.message or not update.effective_user: return # Should not happen
     user = update.effective_user
     logger.info(f"/start command from user {user.id} ({user.username or 'no_username'})")
-    get_or_create_user(user.id) # Ensure user exists
-    balance = get_balance(user.id)
-    balance_str = f"{balance:.2f}" if balance is not None else "N/A"
+
+    user_data = get_or_create_user(user.id) # Ensure user exists
+    balance = user_data['balance'] if user_data else None # Use data from get_or_create
+    balance_str = f"{balance:.2f}" if balance is not None else "Ошибка" # Indicate error better
+
     await update.message.reply_text(
         f"Привет, {html_escape(user.first_name)}! 👋\n"
         f"Ваш баланс: <b>{balance_str}</b> фишек.\n\n"
@@ -366,6 +512,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /help command."""
+    if not update.message or not update.effective_user: return
     user = update.effective_user
     logger.info(f"/help command from user {user.id}")
     help_text = (
@@ -373,11 +521,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Общие команды:</b>\n"
         "/start - Приветствие и баланс\n"
         "/balance - Показать текущий баланс\n"
-        f"/bonus - Получить бонус ({BONUS_AMOUNT:.2f} F, раз в {BONUS_COOLDOWN_HOURS} часов, только в ЛС)\n" # Format bonus amount
+        f"/bonus - Получить бонус ({BONUS_AMOUNT:.2f} F, раз в {BONUS_COOLDOWN_HOURS} часов, только в ЛС)\n"
         "/leaderboard - Показать таблицу лидеров\n"
         "/help - Показать это сообщение\n\n"
         "<b>Игры:</b>\n"
-        f"/blackjack - Начать игру в Блекджек ({NUM_DECKS} колод, только в ЛС)\n" # Mention decks
+        f"/blackjack - Начать игру в Блекджек ({NUM_DECKS} колод, только в ЛС)\n"
         "/roulette - Начать игру в Рулетку (ЛС и группы)\n"
         "  • В рулетке есть таймер ставок после первой ставки.\n"
         f"  • Макс. ставок на раунд: {RL_MAX_BETS_PER_ROUND} (общих), {RL_MAX_BETS_PER_USER} (на игрока).\n"
@@ -387,40 +535,53 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /balance command."""
+    if not update.message or not update.effective_user or not update.effective_chat: return
     user = update.effective_user
     chat = update.effective_chat
     logger.info(f"/balance command from user {user.id} in chat {chat.id} (type: {chat.type})")
-    get_or_create_user(user.id) # Ensure user exists
+
+    # No need to call get_or_create here, get_balance handles it
     balance = get_balance(user.id)
+
     if balance is not None:
         await update.message.reply_text(f"Ваш текущий баланс: <b>{balance:.2f}</b> фишек.", parse_mode=ParseMode.HTML)
     else:
-        await update.message.reply_text("Не удалось получить ваш баланс. Попробуйте /start.")
+        await update.message.reply_text("Не удалось получить ваш баланс. Попробуйте /start или обратитесь к администратору.")
 
 async def bonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /bonus command."""
+    if not update.message or not update.effective_user or not update.effective_chat: return
     user = update.effective_user
     chat = update.effective_chat
     logger.info(f"/bonus command from user {user.id} in chat {chat.id} (type: {chat.type})")
 
     if chat.type != ChatType.PRIVATE:
-        await update.message.reply_text("Получить бонус можно только в <b>личном чате</b>.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("Получить бонус можно только в <b>личном чате</b> со мной.", parse_mode=ParseMode.HTML)
         return
 
-    if not get_or_create_user(user.id): # Ensure user exists and handle potential creation failure
-        await update.message.reply_text("Ошибка: Не удалось найти или создать ваш профиль.")
-        return
+    # get_last_bonus_time handles user creation/fetching
+    last_bonus_utc = get_last_bonus_time(user.id)
+
+    # Check if get_last_bonus_time failed (implies DB issue)
+    # We need get_or_create_user check here because get_last_bonus_time might return None
+    # even if the user exists but hasn't taken a bonus yet.
+    user_exists_check = get_or_create_user(user.id)
+    if user_exists_check is None:
+         await update.message.reply_text("Ошибка: Не удалось получить данные вашего профиля.")
+         return
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    last_bonus_utc = get_last_bonus_time(user.id)
     cooldown = datetime.timedelta(hours=BONUS_COOLDOWN_HOURS)
 
     if last_bonus_utc and (now_utc < last_bonus_utc + cooldown):
         time_diff = last_bonus_utc + cooldown - now_utc
-        # Use divmod for cleaner time calculation
-        hours, remainder = divmod(time_diff.total_seconds(), 3600)
-        minutes, _ = divmod(remainder, 60)
+        # Calculate remaining time more robustly
+        total_seconds = time_diff.total_seconds()
+        hours = int(total_seconds // 3600)
+        minutes = int((total_seconds % 3600) // 60)
         await update.message.reply_text(
-            f"⏳ Бонус уже был получен. Попробуйте снова через: <b>{int(hours)} ч {int(minutes)} мин</b>.",
+            f"⏳ Бонус уже был получен. Попробуйте снова через: <b>{hours} ч {minutes} мин</b>.",
             parse_mode=ParseMode.HTML
         )
         return
@@ -428,18 +589,26 @@ async def bonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Attempt to update balance
     new_balance = update_balance(user.id, BONUS_AMOUNT)
     if new_balance is not None:
-        update_last_bonus_time(user.id, now_utc) # Update timestamp only on successful balance update
+        # Update bonus time only if balance update was successful
+        update_last_bonus_time(user.id, now_utc)
         await update.message.reply_text(
             f"🎉 Поздравляем! Вы получили бонус <b>+{BONUS_AMOUNT:.2f}</b> фишек!\n"
             f"Ваш новый баланс: <b>{new_balance:.2f}</b> фишек.",
             parse_mode=ParseMode.HTML
         )
     else:
-        # Handle potential balance update failure (e.g., DB error, check constraint)
-        await update.message.reply_text("❌ Ошибка при начислении бонуса. Пожалуйста, попробуйте позже.")
+        # Check if balance update failed due to insufficient funds (though bonus is positive)
+        # or other DB issue
+        current_balance = get_balance(user.id) # Check current balance again
+        if current_balance is not None:
+            await update.message.reply_text(f"❌ Ошибка при начислении бонуса. Ваш баланс: {current_balance:.2f} F. Пожалуйста, попробуйте позже или свяжитесь с администратором.")
+        else:
+            await update.message.reply_text("❌ Критическая ошибка при начислении бонуса и проверке баланса. Пожалуйста, попробуйте позже или свяжитесь с администратором.")
 
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /leaderboard command."""
+    if not update.message or not update.effective_user or not update.effective_chat: return
     user = update.effective_user
     chat = update.effective_chat
     logger.info(f"/leaderboard command from user {user.id} in chat {chat.id} (type: {chat.type})")
@@ -449,7 +618,7 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("🏆 Таблица лидеров пока пуста.")
         return
 
-    leaderboard_text = f"🏆 <b>Таблица Лидеров (Топ {LEADERBOARD_LIMIT})</b> 🏆\n\n"
+    leaderboard_text = f"🏆 <b>Таблица Лидеров (Топ {min(LEADERBOARD_LIMIT, len(leaders))})</b> 🏆\n\n" # Adjust title if fewer leaders than limit
     place_emojis = ["🥇", "🥈", "🥉"]
 
     # Fetch display names efficiently
@@ -457,378 +626,392 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     display_name_map = {}
     if user_ids:
         try:
-            # Gather display names concurrently
-            mention_data = await asyncio.gather(*(get_user_mention(context, uid) for uid in user_ids))
-            # Use the display name (second element of the tuple)
-            display_name_map = {uid: mention_data[i][1] for i, uid in enumerate(user_ids)}
+            # Use asyncio.gather for concurrent fetching
+            mention_data_list = await asyncio.gather(*(get_user_mention(context, uid) for uid in user_ids))
+            # Create map from user_id to display_name (second element of tuple)
+            display_name_map = {uid: mention_data[1] for i, uid in enumerate(user_ids) for mention_data in [mention_data_list[i]]} # Corrected map creation
         except Exception as e:
-            logger.error(f"Failed to fetch user display names for leaderboard: {e}")
-            # Fallback if fetching fails
+            logger.error(f"Failed to fetch user display names for leaderboard: {e}", exc_info=True)
+            # Fallback to User_ID if fetching fails
             display_name_map = {uid: f"User_{uid}" for uid in user_ids}
 
-    # Build the leaderboard string
+    # Build the leaderboard text
     for i, leader in enumerate(leaders):
         place = place_emojis[i] if i < len(place_emojis) else f"<b>{i + 1}.</b>"
-        # Use fetched or fallback name
+        # Use display name from map, fallback if somehow missing
         name = display_name_map.get(leader['user_id'], f"User_{leader['user_id']}")
-        balance_str = f"{leader['balance']:.2f}" # Format balance
-        leaderboard_text += f"{place} {name} - <b>{balance_str}</b> F\n" # Use 'F' for chips/currency
+        balance_str = f"{leader.get('balance', 0.0):.2f}" # Use .get with default
+        leaderboard_text += f"{place} {name} - <b>{balance_str}</b> F\n"
 
     try:
         await update.message.reply_text(
             leaderboard_text,
             parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True # Avoid potential preview issues with names
+            disable_web_page_preview=True # Good practice for leaderboards
         )
+    except Forbidden:
+        logger.error(f"Forbidden: Cannot send leaderboard to chat {chat.id}")
     except Exception as e:
         logger.error(f"Error sending leaderboard: {e}", exc_info=True)
-        await update.message.reply_text("Не удалось отобразить таблицу лидеров.")
+        await update.message.reply_text("Не удалось отобразить таблицу лидеров из-за ошибки.")
+
 
 # --- Blackjack Game (Private Chat Only - Persistent Deck) ---
-# --- Start of Updated Blackjack Code ---
 async def blackjack_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /blackjack command or 'New Game' button."""
+    query = update.callback_query
     user = update.effective_user
     chat = update.effective_chat
-    logger.info(f"BJ /blackjack command or 'New Game' from user {user.id} in chat {chat.id} (type: {chat.type})")
+
+    if not user or not chat: return # Basic check
+
+    logger.info(f"BJ /blackjack or 'New Game' callback from user {user.id} in chat {chat.id} (type: {chat.type})")
 
     if chat.type != ChatType.PRIVATE:
-        await update.message.reply_text("Играть в Блекджек можно только в <b>личном чате</b> со мной.", parse_mode=ParseMode.HTML)
+        reply_func = query.message.reply_text if query else update.message.reply_text
+        await reply_func("Играть в Блекджек можно только в <b>личном чате</b> со мной.", parse_mode=ParseMode.HTML)
+        if query: await query.answer() # Answer callback even if rejecting
         return
 
-    # Determine source (command or callback for 'New Game')
-    is_callback = update.callback_query is not None
-    source_message = update.callback_query.message if is_callback else update.message
+    is_callback = query is not None
+    source_message = query.message if is_callback else update.message
     callback_message_id = source_message.message_id if is_callback else None
-    effective_chat_id = chat.id # Use chat.id consistently
+    effective_chat_id = chat.id
 
-    # Answer callback if applicable ('New Game' button)
     if is_callback:
         try:
-            # Provide feedback that a new game is starting
-            await update.callback_query.answer("Новая игра...")
+            # Answer callback quickly
+            await query.answer("Новая игра...")
+        except BadRequest as e:
+             # Ignore "Query is too old" errors silently
+            if "query is too old" not in str(e).lower():
+                 logger.warning(f"Failed to answer callback query in blackjack_start_command: {e}")
         except Exception as e:
             logger.warning(f"Failed to answer callback query in blackjack_start_command: {e}")
 
-    # --- Game State Cleanup ---
-    user_game_data = context.user_data.get(BJ_GAME_KEY, {})
-    previous_message_id = user_game_data.get('message_id')
 
-    # Delete previous game message ONLY if it exists and is DIFFERENT from the callback source
-    if previous_message_id and previous_message_id != callback_message_id:
+    # --- Game State Handling ---
+    # Use context.user_data for private chat game state
+    bj_session_data = context.user_data.get(BJ_GAME_KEY)
+    current_game_message_id = bj_session_data.get('message_id') if bj_session_data else None
+
+    # Scenario 1: User clicks "New Game" button after a round finished
+    if is_callback and bj_session_data and bj_session_data.get('state') == 'waiting_bet':
+        logger.info(f"BJ 'New Game' callback: Proceeding to bet selection for user {user.id} with existing deck.")
+        # Edit the existing message (which showed the 'New Game' button) to show the bet prompt
+        await blackjack_show_state(
+            context, effective_chat_id, user.id,
+            game_state=bj_session_data,
+            edit_existing=True, # Try to edit the message
+            force_game_over_display=False # Show bet prompt, not game over
+        )
+        return # Stop here, bet prompt is shown
+
+    # Scenario 2: User types /blackjack or clicks "New Game" without a valid 'waiting_bet' session
+    logger.info(f"Initializing new BJ session or resetting existing one for user {user.id}.")
+
+    # --- Cleanup Old Message if Necessary ---
+    # Delete the previous game message if its ID is known and different from the callback message ID
+    if current_game_message_id and current_game_message_id != callback_message_id:
         try:
-            await context.bot.delete_message(effective_chat_id, previous_message_id)
-            logger.debug(f"Deleted previous BJ message {previous_message_id} for user {user.id}")
+            await context.bot.delete_message(effective_chat_id, current_game_message_id)
+            logger.debug(f"Deleted previous BJ message {current_game_message_id} for user {user.id}")
         except Exception as e:
-            logger.debug(f"Failed to delete old BJ message {previous_message_id}: {e}")
+            logger.debug(f"Failed to delete old BJ message {current_game_message_id}: {e}")
 
-    # --- Initialize New Session State (Including Persistent Deck) ---
-    logger.info(f"Initializing new BJ session for user {user.id}. Creating persistent deck.")
-    persistent_deck = create_deck() # Create the full shoe
+    # --- Initialize New Game State ---
+    persistent_deck = create_deck()
     total_cards_in_deck = len(persistent_deck)
-    # Shuffle when len(deck) <= total * BJ_SHUFFLE_PERCENTAGE
-    shuffle_threshold_count = math.ceil(total_cards_in_deck * BJ_SHUFFLE_PERCENTAGE)
+    # Ensure threshold is at least 1 card if percentage is very low
+    shuffle_threshold_count = max(1, math.ceil(total_cards_in_deck * (1.0 - BJ_SHUFFLE_PERCENTAGE))) # Threshold is when this many cards are LEFT
 
-    # Store the persistent deck and shuffle info in user_data
+    # Reset user_data for the game
     context.user_data[BJ_GAME_KEY] = {
         'persistent_deck': persistent_deck,
         'total_cards_in_deck': total_cards_in_deck,
         'shuffle_threshold_count': shuffle_threshold_count,
-        'state': 'waiting_bet', # Ready for the first bet
-        'message_id': None, # Will be set when bet prompt is sent
-        # Other game state elements (like player_hands, dealer_hand) will be added in handle_bet
+        'state': 'waiting_bet', # Start by waiting for the first bet
+        'message_id': None, # Will be set when message is sent
+        # Clear potential leftovers from previous games
+        'player_hands': [],
+        'dealer_hand': [],
+        'outcome_text': None,
+        'outcome_determined': False,
+        'split_count': 0,
     }
-    logger.info(f"User {user.id}: Deck created ({total_cards_in_deck} cards). Shuffle threshold: <= {shuffle_threshold_count} cards remaining.")
+    logger.info(f"User {user.id}: Deck created ({total_cards_in_deck} cards). Shuffle when <= {shuffle_threshold_count} cards remain.")
 
-    # --- User and Balance Check ---
-    get_or_create_user(user.id) # Ensure user exists
-    balance = get_balance(user.id)
+    # --- Get Balance and Check Viability ---
+    balance = get_balance(user.id) # Handles user creation if needed
 
     if balance is None:
-        # Use reply_text if started by command, send_message if started by callback (message deleted)
-        reply_func = source_message.reply_text if not is_callback else context.bot.send_message
+        reply_func = context.bot.send_message # Always send new if error occurred
         await reply_func(chat_id=effective_chat_id, text="Не удалось получить ваш баланс. Попробуйте /start.", parse_mode=ParseMode.HTML)
-        context.user_data.pop(BJ_GAME_KEY, None) # Clean up broken state
+        context.user_data.pop(BJ_GAME_KEY, None) # Clean up game state on error
         return
     if balance <= 0:
-        reply_func = source_message.reply_text if not is_callback else context.bot.send_message
+        reply_func = context.bot.send_message
         await reply_func(chat_id=effective_chat_id, text=f"Ваш баланс (<b>{balance:.2f}</b> F) недостаточен для игры. Попробуйте /bonus.", parse_mode=ParseMode.HTML)
-        context.user_data.pop(BJ_GAME_KEY, None) # Clean up broken state
+        context.user_data.pop(BJ_GAME_KEY, None)
         return
 
-    # --- Bet Selection ---
-    bet_options = [1, 5, 10, 25, 50, 100, 250, 500, 1000] # Define available bets
-    valid_bets = [b for b in bet_options if b <= balance] # Filter bets user can afford
+    # --- Show Bet Prompt ---
+    # This part is now handled by calling blackjack_show_state
+    newly_created_session_data = context.user_data.get(BJ_GAME_KEY)
+    if newly_created_session_data:
+         # If started via callback, delete the message with the "New Game" button
+        if is_callback and callback_message_id:
+             try:
+                 await context.bot.delete_message(effective_chat_id, callback_message_id)
+                 logger.debug(f"Deleted callback message {callback_message_id} before showing bet prompt.")
+             except Exception as e:
+                 logger.warning(f"Failed to delete callback message {callback_message_id}: {e}")
 
-    if not valid_bets:
-        min_bet = min(bet_options) if bet_options else 1
-        reply_func = source_message.reply_text if not is_callback else context.bot.send_message
-        await reply_func(chat_id=effective_chat_id, text=f"Ваш баланс (<b>{balance:.2f}</b> F) меньше минимальной ставки (<b>{min_bet}</b> F).", parse_mode=ParseMode.HTML)
-        context.user_data.pop(BJ_GAME_KEY, None) # Clean up broken state
-        return
-
-    # Build keyboard rows (max 4 buttons per row)
-    buttons = []
-    row = []
-    for bet in valid_bets:
-        row.append(InlineKeyboardButton(f"{bet} F", callback_data=f"bj_bet_{bet}"))
-        if len(row) == 4:
-            buttons.append(row)
-            row = []
-    if row: # Add the last row if it's not empty
-        buttons.append(row)
-
-    markup = InlineKeyboardMarkup(buttons)
-    text = f"Ваш баланс: <b>{balance:.2f}</b> F.\nВыберите вашу ставку:"
-
-    # --- Send Bet Prompt ---
-    try:
-        # Delete the 'New Game' button message if this was triggered by callback
-        if callback_message_id:
-            try:
-                await context.bot.delete_message(effective_chat_id, callback_message_id)
-            except Exception as e:
-                 logger.warning(f"Failed to delete callback message {callback_message_id} in blackjack_start_command: {e}")
-
-        # Send the new bet prompt
-        sent_message = await context.bot.send_message(
-            chat_id=effective_chat_id,
-            text=text,
-            reply_markup=markup,
-            parse_mode=ParseMode.HTML
+        await blackjack_show_state(
+            context, effective_chat_id, user.id,
+            game_state=newly_created_session_data,
+            edit_existing=False, # Always send a new message for a new game start/reset
+            force_game_over_display=False
         )
-        # Store the new message ID in the persistent game state
-        bj_session_data = context.user_data.get(BJ_GAME_KEY)
-        if bj_session_data:
-             bj_session_data['message_id'] = sent_message.message_id
-             logger.info(f"BJ bet prompt sent (msg {sent_message.message_id}) for user {user.id}")
-        else:
-             logger.error(f"BJ session data missing after sending bet prompt for user {user.id}")
-
-    except Exception as e:
-        logger.error(f"BJ start error sending bet prompt for user {user.id}: {e}", exc_info=True)
-        # Inform user about the error
-        try:
-            await context.bot.send_message(effective_chat_id, "❌ Произошла ошибка при начале игры.")
-        except Exception:
-            pass # Avoid error loops if sending fails too
-        context.user_data.pop(BJ_GAME_KEY, None) # Clean up potentially broken state
+    else:
+        logger.error(f"BJ session data unexpectedly missing after initialization for user {user.id}")
+        await context.bot.send_message(effective_chat_id, "❌ Произошла ошибка при инициализации игры.")
 
 
 async def blackjack_handle_bet(update: Update, context: ContextTypes.DEFAULT_TYPE, bet: int):
-    q = update.callback_query
-    u = q.from_user
-    uid = u.id
-    chat_id = q.message.chat_id
-    # Retrieve the persistent game session data
+    """Handles player clicking a bet amount button."""
+    query = update.callback_query
+    if not query or not query.message or not query.from_user: return
+
+    user = query.from_user
+    user_id = user.id
+    chat_id = query.message.chat_id
+    bet_prompt_message_id = query.message.message_id
+
     bj_session_data = context.user_data.get(BJ_GAME_KEY, {})
-    bet_prompt_message_id = q.message.message_id # ID of the message with bet buttons
 
-    # --- Input Validation ---
-    # Check if the game state is correct (waiting for bet) and the callback corresponds to the expected message
-    if not bj_session_data or bj_session_data.get('state') != 'waiting_bet' or bj_session_data.get('message_id') != bet_prompt_message_id:
-        await q.answer("Эта игра или кнопка ставки больше неактивны.", show_alert=False)
+    # --- Validate State ---
+    if not bj_session_data:
+        await query.answer("Игра не найдена. Начните новую /blackjack", show_alert=True)
+        try: await query.edit_message_reply_markup(reply_markup=None) # Remove buttons
+        except Exception: pass
+        return
+    if bj_session_data.get('state') != 'waiting_bet':
+        await query.answer("Сейчас нельзя сделать ставку.", show_alert=False)
+        return
+    if bj_session_data.get('message_id') != bet_prompt_message_id:
+        await query.answer("Эта кнопка ставки больше неактивна.", show_alert=False)
+        try: await query.edit_message_reply_markup(reply_markup=None) # Remove buttons
+        except Exception: pass
         return
 
-    balance = get_balance(uid)
+    # --- Validate Bet Amount ---
+    balance = get_balance(user_id)
     if balance is None:
-        await q.answer("Ошибка получения баланса.", show_alert=True)
+        await query.answer("Ошибка получения баланса.", show_alert=True)
         return
-    if not (0 < bet <= balance): # Ensure bet is positive and affordable
-        await q.answer(f"Недопустимая ставка ({bet} F) или недостаточно средств ({balance:.2f} F).", show_alert=True)
+    if not (0 < bet <= balance):
+        await query.answer(f"Недопустимая ставка ({bet} F) или недостаточно средств ({balance:.2f} F).", show_alert=True)
         return
 
-    # --- Get Deck and Check for Reshuffle ---
+    # --- Prepare for Dealing ---
     persistent_deck = bj_session_data.get('persistent_deck')
     shuffle_threshold = bj_session_data.get('shuffle_threshold_count')
-    total_cards = bj_session_data.get('total_cards_in_deck', NUM_DECKS * 52) # Fallback just in case
-
-    # <<< FIX: Initialize shuffle_notification as empty string >>>
-    shuffle_notification = ""
+    total_cards = bj_session_data.get('total_cards_in_deck', NUM_DECKS * 52)
 
     if persistent_deck is None or shuffle_threshold is None:
-        logger.error(f"Persistent deck data missing for user {uid}. Cannot proceed.")
-        await q.answer("Ошибка данных игры (колода отсутствует). Попробуйте /blackjack", show_alert=True)
-        context.user_data.pop(BJ_GAME_KEY, None) # Clear broken state
+        logger.error(f"Persistent deck data missing for user {user_id}. Cannot proceed.")
+        await query.answer("Ошибка данных игры (колода отсутствует). Попробуйте /blackjack", show_alert=True)
+        context.user_data.pop(BJ_GAME_KEY, None)
         try: await context.bot.delete_message(chat_id=chat_id, message_id=bet_prompt_message_id)
         except Exception: pass
         return
 
+    # --- Check for Shuffle ---
     cards_remaining = len(persistent_deck)
-    logger.info(f"User {uid}: Starting hand. Cards remaining: {cards_remaining}/{total_cards}. Shuffle threshold: <= {shuffle_threshold}")
+    shuffle_notification = "" # Initialize as empty string
+    logger.info(f"User {user_id}: Starting hand. Cards remaining: {cards_remaining}/{total_cards}. Shuffle threshold: <= {shuffle_threshold}")
 
     if cards_remaining <= shuffle_threshold:
-        logger.warning(f"User {uid}: Deck penetration reached ({cards_remaining} <= {shuffle_threshold}). Shuffling...")
-        persistent_deck = create_deck() # Create a new shuffled deck
-        bj_session_data['persistent_deck'] = persistent_deck # Update the deck in user_data
-        cards_remaining = len(persistent_deck) # Update remaining count
-        # <<< FIX: Assign message only if shuffle happens >>>
-        shuffle_notification = "♻️ Идет перетасовка колоды...\n\n" # Message to show user
-        logger.info(f"User {uid}: Deck reshuffled. Cards remaining: {cards_remaining}")
-
-        # --- Update message temporarily to show shuffle ---
+        logger.warning(f"User {user_id}: Deck penetration reached ({cards_remaining} <= {shuffle_threshold}). Shuffling...")
+        persistent_deck = create_deck() # Create and shuffle a new deck
+        bj_session_data['persistent_deck'] = persistent_deck
+        bj_session_data['total_cards_in_deck'] = len(persistent_deck) # Update total card count
+        # Recalculate threshold based on new deck size (should be same if NUM_DECKS is constant)
+        bj_session_data['shuffle_threshold_count'] = max(1, math.ceil(len(persistent_deck) * (1.0 - BJ_SHUFFLE_PERCENTAGE)))
+        cards_remaining = len(persistent_deck)
+        shuffle_notification = "♻️ Идет перетасовка колоды...\n\n"
+        logger.info(f"User {user_id}: Deck reshuffled. Cards remaining: {cards_remaining}")
+        # Show shuffle message briefly (edit the bet prompt message)
         try:
             await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=bet_prompt_message_id,
+                chat_id=chat_id, message_id=bet_prompt_message_id,
                 text=shuffle_notification + f"Ваш баланс: {balance:.2f} F\nРаздаем карты...",
-                parse_mode=ParseMode.HTML,
-                reply_markup=None # Remove bet buttons during shuffle message
+                parse_mode=ParseMode.HTML, reply_markup=None # Remove bet buttons
             )
-            await asyncio.sleep(1.0) # Brief pause to show shuffle message
+            await asyncio.sleep(1.5) # Pause to show message
+        except BadRequest as e:
+             if "message is not modified" not in str(e).lower():
+                 logger.warning(f"Could not edit message {bet_prompt_message_id} to show shuffle: {e}")
         except Exception as e:
-             logger.warning(f"Could not edit message {bet_prompt_message_id} to show shuffle: {e}")
-             # Continue anyway, shuffle still happened
-    # <<< FIX: No 'else' needed here, shuffle_notification defaults to "" >>>
+            logger.warning(f"Could not edit message {bet_prompt_message_id} to show shuffle: {e}")
+        # Proceed even if edit fails
 
-    # --- Process Bet ---
-    if update_balance(uid, -bet) is None:
-        await q.answer("Ошибка при списании ставки.", show_alert=True)
+    # --- Deduct Bet ---
+    new_balance = update_balance(user_id, -bet)
+    if new_balance is None:
+        # Handle case where deduction failed (e.g., DB error, constraint violation)
+        await query.answer("Ошибка при списании ставки.", show_alert=True)
+        # Don't proceed with dealing
         return
 
-    # --- Deal Initial Hands using the persistent deck ---
+    # --- Deal Cards ---
     player_hand, dealer_hand = [], []
-    cards_dealt_count = 0 # Track cards dealt this specific hand for BJ check
+    cards_dealt_count = 0
+    deck_to_draw_from = bj_session_data['persistent_deck'] # Use the potentially updated deck
+
     try:
-        # Use the persistent_deck from bj_session_data
-        deck_to_draw_from = bj_session_data['persistent_deck']
         for _ in range(2):
-            card_p = draw_card(deck_to_draw_from) # Draw from persistent deck
+            card_p = draw_card(deck_to_draw_from)
             if not card_p: raise IndexError("Deck empty during player deal")
-            player_hand.append(card_p)
-            cards_dealt_count += 1
+            player_hand.append(card_p); cards_dealt_count += 1
 
-            card_d = draw_card(deck_to_draw_from) # Draw from persistent deck
+            card_d = draw_card(deck_to_draw_from)
             if not card_d: raise IndexError("Deck empty during dealer deal")
-            dealer_hand.append(card_d)
-            cards_dealt_count += 1
-        logger.info(f"User {uid}: Dealt initial hands. Cards remaining after deal: {len(deck_to_draw_from)}")
-
+            dealer_hand.append(card_d); cards_dealt_count += 1
+        logger.info(f"User {user_id}: Dealt initial hands. Cards remaining after deal: {len(deck_to_draw_from)}")
     except IndexError as e:
-        logger.error(f"BJ dealing error for user {uid}: {e}")
-        update_balance(uid, bet) # Attempt refund
+        logger.error(f"BJ dealing error for user {user_id}: {e}")
+        update_balance(user_id, bet) # Refund bet on error
         try:
-            # Use edit_message_text on the original prompt message ID
+             # Try to edit the message to show error, fallback to send
             await context.bot.edit_message_text(
                 chat_id=chat_id, message_id=bet_prompt_message_id,
                 text=f"❌ Ошибка раздачи карт ({e}). Ставка {bet} F возвращена.",
-                reply_markup=None # Remove buttons on error
+                reply_markup=None
             )
-        except Exception: pass
-        context.user_data.pop(BJ_GAME_KEY, None) # Clean game state
+        except Exception:
+            await context.bot.send_message(chat_id, f"❌ Ошибка раздачи карт ({e}). Ставка {bet} F возвращена.")
+        context.user_data.pop(BJ_GAME_KEY, None) # End game session
         return
     except Exception as e:
-        logger.error(f"BJ unexpected dealing error for user {uid}: {e}", exc_info=True)
-        update_balance(uid, bet) # Attempt refund
+        logger.error(f"BJ unexpected dealing error for user {user_id}: {e}", exc_info=True)
+        update_balance(user_id, bet) # Refund bet
         try:
-             await context.bot.edit_message_text(
-                 chat_id=chat_id, message_id=bet_prompt_message_id,
-                 text=f"❌ Непредвиденная ошибка ({e}). Ставка {bet} F возвращена.",
-                 reply_markup=None
-             )
-        except Exception: pass
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=bet_prompt_message_id,
+                text=f"❌ Непредвиденная ошибка ({e}). Ставка {bet} F возвращена.",
+                reply_markup=None
+            )
+        except Exception:
+             await context.bot.send_message(chat_id, f"❌ Непредвиденная ошибка ({e}). Ставка {bet} F возвращена.")
         context.user_data.pop(BJ_GAME_KEY, None)
         return
 
-    # --- Check for Initial Blackjacks ---
+    # --- Initial Game State Setup ---
     player_value = get_hand_value(player_hand)
     dealer_value = get_hand_value(dealer_hand)
-    # Blackjack only counts on the initial two cards
-    player_has_blackjack = (player_value == 21 and cards_dealt_count == 4 and len(player_hand) == 2)
-    dealer_has_blackjack = (dealer_value == 21 and cards_dealt_count == 4 and len(dealer_hand) == 2)
+    # Blackjack check: 21 on first two cards
+    player_has_blackjack = (player_value == 21 and len(player_hand) == 2)
+    dealer_has_blackjack = (dealer_value == 21 and len(dealer_hand) == 2)
 
-    game_state = 'player_turn' # Default state for this hand
+    game_state = 'player_turn'
     hand_status = 'active'
     outcome_text = None
-    winnings = 0.0 # Track winnings paid in this step (for BJ case)
+    winnings = 0.0 # Track winnings paid immediately (for BJ)
+    outcome_determined = False
 
     if player_has_blackjack:
         hand_status = 'blackjack'
-        game_state = 'game_over' # Hand/Game ends immediately
+        game_state = 'game_over' # Game ends immediately if player has BJ
+        outcome_determined = True
         if dealer_has_blackjack:
             outcome_text = "⚖️ Ничья! У обоих Блекджек."
-            update_balance(uid, bet) # Return original bet
-            winnings = bet
+            winnings = bet # Return original bet
+            update_balance(user_id, bet) # Refund push
         else:
             bj_payout_amount = bet * BLACKJACK_PAYOUT
-            update_balance(uid, bet + bj_payout_amount) # Return original bet + payout
+            winnings = bet + bj_payout_amount # Original bet + payout
+            update_balance(user_id, winnings) # Pay winnings
             outcome_text = f"✨ БЛЕКДЖЕК! ✨ Выигрыш {bj_payout_amount:.2f} F!"
-            winnings = bet + bj_payout_amount
     elif dealer_has_blackjack:
-        game_state = 'game_over' # Hand/Game ends immediately
+        game_state = 'game_over' # Game ends immediately
+        outcome_determined = True
         outcome_text = "😥 У дилера Блекджек! Вы проиграли."
-        winnings = 0.0
+        winnings = 0.0 # Player loses bet (already deducted)
 
-    # --- Update Game State in user_data (add hand-specific info) ---
+    # --- Update Session Data ---
+    # Check balance again for double/split possibility check later
+    current_balance_after_bet = get_balance(user_id)
+    can_double = (game_state == 'player_turn' and len(player_hand) == 2 and current_balance_after_bet is not None and current_balance_after_bet >= bet)
+    can_split = (game_state == 'player_turn' and len(player_hand) == 2 and
+                 player_hand[0] and player_hand[1] and # Ensure cards exist
+                 get_card_value(player_hand[0]) == get_card_value(player_hand[1]) and
+                 current_balance_after_bet is not None and current_balance_after_bet >= bet and
+                 bj_session_data.get('split_count', 0) < MAX_SPLITS)
+
+
     bj_session_data.update({
-        'state': game_state, # State of the *current hand*
-        'player_hands': [{ # Store hands for the current round
+        'state': game_state,
+        'player_hands': [{ # Store hands as a list of dicts for splits
             'hand': player_hand,
             'bet': bet,
-            'status': hand_status,
-            'can_double': (game_state == 'player_turn' and len(player_hand) == 2),
-            'can_split': False
+            'status': hand_status, # 'active', 'blackjack', 'bust', 'stand'
+            'can_double': can_double,
+            'can_split': can_split
         }],
-        'current_hand_index': 0,
-        'dealer_hand': dealer_hand, # Dealer hand for the current round
-        'initial_bet': bet, # Initial bet for the *first* hand this round
-        'split_count': 0,
-        'outcome_text': outcome_text, # Store immediate outcome if any
-        'outcome_determined': (game_state == 'game_over'),
-        'total_winnings_paid': winnings if game_state == 'game_over' else 0.0,
-        # <<< FIX: Store the (potentially empty) string >>>
-        'shuffle_occurred_message': shuffle_notification
+        'current_hand_index': 0, # Index of the hand being played
+        'dealer_hand': dealer_hand,
+        'initial_bet': bet, # Store initial bet for reference if needed
+        'split_count': 0, # Initialize split count
+        'outcome_text': outcome_text, # Store immediate outcome text if any
+        'outcome_determined': outcome_determined,
+        'total_winnings_paid': winnings, # Track winnings paid out so far
+        'shuffle_occurred_message': shuffle_notification # Store to display once
     })
 
-    # --- Update Telegram Message ---
-    # Delete the bet prompt message first
+    # --- Delete the bet prompt message ---
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=bet_prompt_message_id)
     except Exception as e:
         logger.warning(f"Could not delete bet prompt message {bet_prompt_message_id}: {e}")
+        # Continue anyway, but clear the message_id from state if deletion failed? No, show_state will handle it.
 
-    # Show the initial game state (new message)
-    new_message_info = await blackjack_show_state(context, chat_id, uid, game_state=bj_session_data, edit_existing=False)
+    # --- Show Initial Hand State ---
+    # Always send a new message for the game state after bet confirmed
+    await blackjack_show_state(
+        context, chat_id, user_id,
+        game_state=bj_session_data,
+        edit_existing=False
+    )
 
-    if new_message_info and isinstance(new_message_info, Message):
-        # Update message_id in the persistent game state
-        bj_session_data['message_id'] = new_message_info.message_id
-        logger.info(f"BJ initial hand state sent (msg {new_message_info.message_id}) for user {uid}. State: {game_state}")
-        # Clear the shuffle message after showing it once
-        bj_session_data.pop('shuffle_occurred_message', None) # Use pop to safely remove
+    # Answer the original bet button callback *after* showing the state
+    if not shuffle_notification: # Don't show standard answer if shuffle message was shown
+       try:
+           await query.answer(f"Ставка принята: {bet} F")
+       except BadRequest as e:
+           if "query is too old" not in str(e).lower():
+               logger.debug(f"Query answer failed (too old?): {e}")
+       except Exception as e:
+            logger.warning(f"Failed to answer bet callback query: {e}")
 
-        # If game ended immediately (BJ), transition state back to 'waiting_bet'
-        if bj_session_data.get('outcome_determined'): # Use get to avoid KeyError if already popped
-             # Instead of clearing the whole session, reset for next bet
-            bj_session_data['state'] = 'waiting_bet'
-            bj_session_data.pop('player_hands', None)
-            bj_session_data.pop('dealer_hand', None)
-            # outcome_text stored for display, pop after showing
-            bj_session_data.pop('outcome_determined', None)
-            bj_session_data.pop('split_count', None)
-            # Show the "New Game" button and final result
-            await blackjack_show_state(context, chat_id, uid, game_state=bj_session_data, edit_existing=True, force_game_over_display=True, final_outcome_text=outcome_text)
-            bj_session_data.pop('outcome_text', None) # Pop outcome text after display
-            logger.info(f"BJ game state reset to 'waiting_bet' for user {uid} after initial Blackjack outcome.")
+    # If game ended immediately (BJ checks), state is already 'game_over'.
+    # The blackjack_show_state called above will handle displaying the final outcome
+    # and the "New Game" button because 'outcome_determined' is true.
+    # We need to reset state for the 'New Game' button logic.
+    if bj_session_data.get('outcome_determined'):
+        logger.info(f"BJ immediate outcome: State will be reset to 'waiting_bet' for user {user_id} after display.")
+        # Prepare for the next round / 'New Game' button functionality
+        bj_session_data['state'] = 'waiting_bet'
+        # Clear sensitive data for the next round, keep deck and threshold
+        bj_session_data.pop('player_hands', None)
+        bj_session_data.pop('dealer_hand', None)
+        bj_session_data.pop('current_hand_index', None)
+        bj_session_data.pop('split_count', None)
+        # Keep outcome_text for the final display triggered by show_state
+        # Keep outcome_determined flag for show_state logic
+        # message_id is updated by show_state
 
-    elif not new_message_info:
-        # Handle critical error where game state couldn't be shown
-        logger.error(f"Failed to send initial BJ state for user {uid}")
-        update_balance(uid, bet) # Attempt to refund bet
-        context.user_data.pop(BJ_GAME_KEY, None) # Clean game state entirely on error
-        await context.bot.send_message(chat_id, "❌ Ошибка отображения игры. Ставка возвращена. Попробуйте /blackjack")
-        return # Stop further execution
-
-    # Acknowledge the button press
-    # Answer should have been sent earlier if shuffle occurred, otherwise answer now
-    if not shuffle_notification: # Check if shuffle notification string is empty
-        try:
-             await q.answer(f"Ставка принята: {bet} F")
-        except BadRequest as e: # Handle "query is too old" if user was slow
-            if "query is too old" in str(e).lower():
-                logger.debug(f"Query too old to answer bet confirmation for user {uid}")
-            else:
-                logger.error(f"Error answering bet confirmation for user {uid}: {e}") # Log other errors
-                # Don't re-raise, but log it
 
 async def blackjack_show_state(
     context: ContextTypes.DEFAULT_TYPE,
@@ -836,524 +1019,587 @@ async def blackjack_show_state(
     user_id: int,
     game_state: dict | None = None,
     edit_existing: bool = True,
-    force_game_over_display: bool = False, # Flag to show summary + bet prompt
-    final_outcome_text: str | None = None # Text from determine_outcome
+    force_game_over_display: bool = False, # Flag to show summary + New Game button
+    final_outcome_text: str | None = None # Text from determine_outcome (overrides game_state['outcome_text'])
 ) -> Message | int | None:
     """
-    Updates or sends the Blackjack game state message. Can show active game or end-of-round summary.
-    Separator line now represents approximate remaining decks.
+    Updates or sends the Blackjack game state message. Can show active game,
+    bet prompt, or end-of-round summary.
+    Returns the message object if a new message was sent, message_id if edited, or None on error.
     """
-    is_new_send = False
-
-    # Fetch game state if not provided (using the persistent key)
     if game_state is None:
-        game_state = context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
+        game_state = context.user_data.get(BJ_GAME_KEY)
 
     if not game_state:
         logger.warning(f"blackjack_show_state called for user {user_id} but no game session state found.")
         return None
 
     message_id_to_process = game_state.get('message_id')
+    current_state = game_state.get('state', 'unknown')
 
+    # Determine if we should attempt editing or force send new
+    attempt_edit = edit_existing and message_id_to_process is not None
     if edit_existing and not message_id_to_process:
-        logger.warning(f"BJ show_state: Attempted to edit but no message_id for user {user_id}. Forcing send new.")
-        edit_existing = False
+        logger.debug(f"BJ show_state: Attempted to edit but no message_id for user {user_id}. Forcing send new.")
+        attempt_edit = False
 
-    # --- Prepare Message Content ---
-    balance = get_balance(user_id)
-    balance_str = f"{balance:.2f}" if balance is not None else "N/A"
-    state = game_state.get('state', 'unknown') # 'player_turn', 'dealer_turn', 'waiting_bet'
+    # --- Get Required Data ---
+    balance = get_balance(user_id) # Refresh balance
+    balance_str = f"{balance:.2f}" if balance is not None else "Ошибка"
 
-    # Check if we need to force the "Game Over" display style (end of round)
-    show_final_summary = force_game_over_display or game_state.get('outcome_determined') # Check outcome_determined flag
+    # Determine if we are showing the end-of-round summary
+    # This happens if forced, or if state is 'waiting_bet' AND an outcome text exists
+    has_outcome = final_outcome_text is not None or game_state.get('outcome_determined', False)
+    show_final_summary = force_game_over_display or (current_state == 'waiting_bet' and has_outcome)
 
-    # --- Build Text ---
-    # Add shuffle notification if present
-    shuffle_msg = game_state.get('shuffle_occurred_message', '')
-    text = shuffle_msg # Start with shuffle message if any
+    # Check for one-time shuffle message
+    shuffle_msg = game_state.pop('shuffle_occurred_message', '') # Get and remove
 
+    text = shuffle_msg # Prepend shuffle message if it exists
     text += f"<b>Блекджек</b> | Баланс: <b>{balance_str}</b> F\n"
 
-    # Show persistent deck info
-    deck_len = len(game_state.get('persistent_deck', []))
-    total_len = game_state.get('total_cards_in_deck', '?')
-    text += f"Карт в колоде: {deck_len}/{total_len}\n" # Show deck status
+    # --- Calculate Deck Separator ---
+    deck = game_state.get('persistent_deck', [])
+    deck_len = len(deck)
+    cards_per_deck = 52 # Standard
+    # Approximate remaining decks visual indicator
+    remaining_decks_approx = max(0, deck_len / cards_per_deck) # Use float for finer scale
+    # Scale dashes, e.g., 8 decks = 8 dashes, 1 deck = 1 dash
+    num_dashes = max(1, round(remaining_decks_approx * (NUM_DECKS / NUM_DECKS))) # Simpler: use NUM_DECKS or a fixed max
+    num_dashes = max(1, min(NUM_DECKS, round(remaining_decks_approx))) # Ensure 1 to NUM_DECKS dashes
+    separator = "─" * num_dashes # Use a nicer dash character
 
-    # <<< Calculate separator based on remaining approximate decks >>>
-    cards_per_deck = 52
-    # Calculate approximate number of full decks remaining
-    remaining_decks_approx = deck_len // cards_per_deck if deck_len > 0 else 0
-    # Ensure at least one dash is shown, even if less than a full deck remains
-    num_dashes = max(1, remaining_decks_approx)
-    separator = "-" * num_dashes
-    # Add a note about the separator meaning (optional)
-    # text += f"<i>({num_dashes} тире ≈ {remaining_decks_approx} кол.)</i>\n"
+    keyboard_rows = [] # Initialize keyboard rows list
 
+    # --- Build Text and Keyboard based on State ---
 
     if show_final_summary:
         # --- Display End-of-Round Summary ---
-        text += f"{separator}\n" # Use dynamic separator
-        text += "<b>Раунд окончен!</b>\n"
-        outcome_content = final_outcome_text or game_state.get('outcome_text', 'Результат не определен.')
+        text += f"{separator}\n"
+        text += "<b>🏁 Раунд окончен! 🏁</b>\n"
+        # Use passed outcome text first, then from game_state
+        outcome_content = final_outcome_text if final_outcome_text is not None else game_state.get('outcome_text', 'Результат не определен.')
         text += outcome_content
-        final_balance = get_balance(user_id)
+        # Show final balance after payout/loss
+        final_balance = get_balance(user_id) # Get balance again after potential updates
         text += f"\n\nИтоговый баланс: <b>{final_balance:.2f}</b> F." if final_balance is not None else ""
-        text += f"\n{separator}\n" # Use dynamic separator
-        text += f"Ваш баланс: <b>{balance_str}</b> F.\nВыберите вашу ставку для следующей раздачи:"
-        game_state['state'] = 'waiting_bet'
 
-    else:
+        keyboard_rows.append([InlineKeyboardButton("🔄 Новая игра", callback_data="bj_new_game")])
+        # Ensure state is correctly set for the next round trigger
+        game_state['state'] = 'waiting_bet'
+        game_state['outcome_determined'] = False # Reset flag after display
+        game_state.pop('outcome_text', None) # Clean up text
+
+    elif current_state == 'waiting_bet' and not show_final_summary:
+        # --- Display Bet Prompt ---
+        text += f"{separator}\n"
+        text += f"Ваш баланс: <b>{balance_str}</b> F.\nВыберите вашу ставку:"
+
+        bet_options = [1, 5, 10, 25, 50, 100, 250, 500, 1000] # Example bets
+        valid_bets = [b for b in bet_options if balance is not None and b <= balance]
+
+        if not valid_bets:
+            min_bet_opt = min(bet_options) if bet_options else 1
+            if balance is not None and balance > 0:
+                text += f"\n<i>Недостаточно средств для минимальной ставки ({min_bet_opt} F).</i>"
+            elif balance == 0:
+                 text += "\n<i>Недостаточно средств для игры. Попробуйте /bonus</i>"
+            else: # balance is None
+                 text += "\n<i>Ошибка получения баланса.</i>"
+        else:
+            # Create button rows (e.g., 4 buttons per row)
+            row = []
+            for bet in valid_bets:
+                row.append(InlineKeyboardButton(f"{bet} F", callback_data=f"bj_bet_{bet}"))
+                if len(row) == 4:
+                    keyboard_rows.append(row)
+                    row = []
+            if row: # Add remaining buttons
+                keyboard_rows.append(row)
+
+    elif current_state in ['player_turn', 'dealer_turn']:
         # --- Display Active Game State ---
         player_hands_data = game_state.get('player_hands', [])
         dealer_hand = game_state.get('dealer_hand', [])
         current_hand_idx = game_state.get('current_hand_index', -1)
-        dealer_value = get_hand_value(dealer_hand)
 
         total_bet = sum(h.get('bet', 0) for h in player_hands_data if isinstance(h, dict))
         num_hands = len(player_hands_data)
         text += f"Общая ставка: <b>{total_bet}</b> F{' (Рук: ' + str(num_hands) + ')' if num_hands > 1 else ''}\n"
-        text += f"{separator}\n" # Use dynamic separator
+        text += f"{separator}\n"
 
-        # Dealer Hand
+        # Determine if dealer's card should be hidden
+        # Hide if it's player's turn AND not all player hands are finished
         all_player_hands_finished = all(
-            isinstance(hdata, dict) and hdata.get('status') in ['bust', 'stand', 'blackjack']
-            for hdata in player_hands_data
+            isinstance(h, dict) and h.get('status') in ['bust', 'stand', 'blackjack']
+            for h in player_hands_data
         )
-        hide_dealer_card = (state == 'player_turn' and not all_player_hands_finished and len(dealer_hand) > 1)
-
+        hide_dealer_card = (current_state == 'player_turn' and not all_player_hands_finished)
+        dealer_value = get_hand_value(dealer_hand)
         dealer_value_display = "??"
         if dealer_hand:
-            if not hide_dealer_card: dealer_value_display = str(dealer_value)
-            else: dealer_value_display = f"{get_card_value(dealer_hand[0])}+?"
-        text += f"<b>Диллер:</b> {format_hand(dealer_hand, hide_one=hide_dealer_card)} ({dealer_value_display})\n\n"
+            if hide_dealer_card and len(dealer_hand) > 0 and dealer_hand[0]:
+                # Show only the first card's value + ?
+                 dealer_value_display = f"{get_card_value(dealer_hand[0])}+?"
+            elif not hide_dealer_card:
+                 dealer_value_display = str(dealer_value)
+            # If hide_dealer_card is true but dealer hand has only 1 card, format_hand handles it
 
-        # Player Hand(s)
+        text += f"<b>Диллер:</b> {format_hand(dealer_hand, hide_one=hide_dealer_card)} ({dealer_value_display})\n\n"
         text += "<b>Вы:</b>\n"
-        active_hand_data = None
+        active_hand_data_for_buttons = None
+
         for i, hand_data in enumerate(player_hands_data):
-            if not isinstance(hand_data, dict): continue
+            if not isinstance(hand_data, dict): continue # Skip invalid entries
+
             hand = hand_data.get('hand', [])
             hand_value = get_hand_value(hand)
             hand_status = hand_data.get('status', '?')
             hand_bet = hand_data.get('bet', 0)
-            is_current_turn = (i == current_hand_idx and hand_status == 'active' and state == 'player_turn')
 
-            indicator = "▶️" if is_current_turn else ("✅" if hand_status == 'stand' else ("❌" if hand_status == 'bust' else ("💰" if hand_status == 'blackjack' else "▫️")))
+            is_current_turn = (i == current_hand_idx and hand_status == 'active' and current_state == 'player_turn')
+            indicator = "▶️" if is_current_turn else \
+                        ("✅" if hand_status == 'stand' else \
+                         ("❌" if hand_status == 'bust' else \
+                          ("💰" if hand_status == 'blackjack' else \
+                           "❔"))) # Default/unknown indicator
+
             text += f"{indicator} Рука {i+1}: {format_hand(hand)} (<b>{hand_value}</b>) [<i>{hand_bet} F</i>]"
+
             status_label = ""
             if hand_status == 'bust': status_label = " - <b>Перебор!</b>"
             elif hand_status == 'blackjack': status_label = " - <b>Блекджек!</b>"
-            elif hand_status == 'stand' and not is_current_turn : status_label = " - <i>Стоп</i>"
+            elif hand_status == 'stand': status_label = " - <i>Стоп</i>"
+
             text += status_label + "\n"
-            if is_current_turn: active_hand_data = hand_data
 
-        if state == 'dealer_turn':
-             text += "\n<i>⏳ Ход дилера...</i>"
+            if is_current_turn:
+                active_hand_data_for_buttons = hand_data # Store data for button generation
 
-
-    # --- Build Keyboard ---
-    keyboard = []
-    if state == 'waiting_bet': # After round end or for initial bet prompt
-        # Show bet selection keyboard again
-        bet_options = [1, 5, 10, 25, 50, 100, 250, 500, 1000]
-        current_balance = get_balance(user_id) # Get fresh balance
-        valid_bets = [b for b in bet_options if current_balance is not None and b <= current_balance]
-        if not valid_bets and current_balance is not None and current_balance > 0: # Handle case where balance < min bet
-             min_bet_opt = min(bet_options) if bet_options else 1
-             text += f"\n<i>Недостаточно средств для мин. ставки ({min_bet_opt} F).</i>"
-             # Optionally add /bonus or other info here
-        elif current_balance is None or current_balance <= 0:
-             text += "\n<i>Недостаточно средств для игры. Используйте /bonus</i>"
-        else:
-            row = []
-            for bet in valid_bets:
-                row.append(InlineKeyboardButton(f"{bet} F", callback_data=f"bj_bet_{bet}"))
-                if len(row) == 4: keyboard.append(row); row = []
-            if row: keyboard.append(row)
-        # Add a button to explicitly end the session? (Optional)
-        # keyboard.append([InlineKeyboardButton("⏹️ Закончить игру", callback_data="bj_end_session")])
-
-    elif state == 'player_turn' and game_state.get('player_hands'): # Check player_hands exists
-        # Active game buttons (Hit, Stand, Double, Split)
-        current_hand_idx = game_state.get('current_hand_index', -1)
-        player_hands = game_state.get('player_hands', [])
-        active_hand_data = player_hands[current_hand_idx] if 0 <= current_hand_idx < len(player_hands) else None
-
-        if active_hand_data and active_hand_data.get('status') == 'active':
-            player_hand = active_hand_data.get('hand', [])
-            player_bet = active_hand_data.get('bet', 0)
-            current_balance = get_balance(user_id) # Fresh balance check
-
-            can_double = (
-                active_hand_data.get('can_double', False) and len(player_hand) == 2 and
-                current_balance is not None and current_balance >= player_bet
-            )
-            can_split = (
-                len(player_hand) == 2 and player_hand[0] and player_hand[1] and
-                get_card_value(player_hand[0]) == get_card_value(player_hand[1]) and
-                current_balance is not None and current_balance >= player_bet and
-                game_state.get('split_count', 0) < MAX_SPLITS
-            )
-            active_hand_data['can_split'] = can_split # Update split possibility
-
+        # --- Add Action Buttons ---
+        if current_state == 'player_turn' and active_hand_data_for_buttons:
             action_buttons = [
                 InlineKeyboardButton("Еще", callback_data=f"bj_hit_{current_hand_idx}"),
                 InlineKeyboardButton("Хватит", callback_data=f"bj_stand_{current_hand_idx}")
             ]
-            keyboard.append(action_buttons)
-            special_buttons = []
-            if can_double: special_buttons.append(InlineKeyboardButton("Удвоить", callback_data=f"bj_double_{current_hand_idx}"))
-            if can_split: special_buttons.append(InlineKeyboardButton("Разделить", callback_data=f"bj_split_{current_hand_idx}"))
-            if special_buttons: keyboard.append(special_buttons)
-        else:
-             logger.warning(f"BJ show_state: state is 'player_turn' but no active hand data found for user {user_id}")
+            keyboard_rows.append(action_buttons)
 
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+            special_buttons = []
+            player_bet = active_hand_data_for_buttons.get('bet', 0)
+            # Check flags AND balance for double/split
+            can_double_flag = active_hand_data_for_buttons.get('can_double', False)
+            can_split_flag = active_hand_data_for_buttons.get('can_split', False)
+
+            if can_double_flag and balance is not None and balance >= player_bet:
+                special_buttons.append(InlineKeyboardButton("Удвоить", callback_data=f"bj_double_{current_hand_idx}"))
+            if can_split_flag and balance is not None and balance >= player_bet:
+                 # Re-verify split conditions slightly more strictly here if needed
+                 player_hand = active_hand_data_for_buttons.get('hand', [])
+                 if (len(player_hand) == 2 and player_hand[0] and player_hand[1] and
+                     get_card_value(player_hand[0]) == get_card_value(player_hand[1]) and
+                     game_state.get('split_count', 0) < MAX_SPLITS):
+                     special_buttons.append(InlineKeyboardButton("Разделить", callback_data=f"bj_split_{current_hand_idx}"))
+
+            if special_buttons:
+                keyboard_rows.append(special_buttons)
+
+        elif current_state == 'dealer_turn':
+            text += "\n<i>⏳ Ход дилера...</i>"
+
+    # --- Finalize Keyboard ---
+    reply_markup = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
 
     # --- Send/Edit Message with Retries ---
-    # [ The existing send/edit logic with retries remains the same ]
     result: Message | int | None = None
-    max_retries = 1
+    max_retries = 2 # Allow a retry
     current_retry = 0
     edit_failed_and_sending_new = False
 
     while current_retry <= max_retries:
         try:
-            if edit_existing and message_id_to_process:
+            if attempt_edit:
                 logger.debug(f"Attempting edit (try {current_retry+1}) BJ state msg {message_id_to_process} for user {user_id}")
+                # Edit returns True on success, raises error otherwise
                 await context.bot.edit_message_text(
-                    chat_id=chat_id, message_id=message_id_to_process,
-                    text=text, reply_markup=reply_markup, parse_mode=ParseMode.HTML
+                    chat_id=chat_id, message_id=message_id_to_process, text=text,
+                    reply_markup=reply_markup, parse_mode=ParseMode.HTML
                 )
                 logger.debug(f"Successfully edited BJ state msg {message_id_to_process}")
-                result = message_id_to_process
+                result = message_id_to_process # Return ID if edit successful
                 break
             else:
-                is_new_send = True
-                logger.debug(f"Sending NEW BJ state message for user {user_id}")
-                if message_id_to_process and edit_existing: # Delete old if edit failed
-                    try: await context.bot.delete_message(chat_id, message_id_to_process)
-                    except Exception: pass
-                    edit_failed_and_sending_new = True
+                # --- Send New Message ---
+                logger.debug(f"Sending NEW BJ state message for user {user_id} (Attempt edit: {attempt_edit}, Edit failed: {edit_failed_and_sending_new})")
+                # If we are here because edit failed, try deleting the old one first
+                if edit_failed_and_sending_new and message_id_to_process:
+                    try:
+                        await context.bot.delete_message(chat_id, message_id_to_process)
+                    except Exception: pass # Ignore deletion error
 
                 new_message = await context.bot.send_message(
                     chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=ParseMode.HTML
                 )
-                # Update message_id in the persistent game state
-                current_session_state = context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
+                # Update message_id in the *current* game state immediately
+                current_session_state = context.user_data.get(BJ_GAME_KEY)
                 if current_session_state:
                     current_session_state['message_id'] = new_message.message_id
                     logger.debug(f"Sent NEW BJ state msg {new_message.message_id} for user {user_id}. Updated game state.")
                 else:
-                     logger.warning(f"Sent NEW BJ state msg {new_message.message_id}, but session state missing for user {user_id}.")
-                result = new_message
+                    # This is problematic, game state disappeared
+                    logger.warning(f"Sent NEW BJ state msg {new_message.message_id}, but session state missing for user {user_id}.")
+                result = new_message # Return the new message object
                 break
-
         except BadRequest as e:
             error_str = str(e).lower()
             if "message is not modified" in error_str:
-                result = message_id_to_process
                 logger.debug(f"BJ state msg {message_id_to_process} not modified.")
+                result = message_id_to_process # Treat as success
                 break
             elif "message to edit not found" in error_str or "chat not found" in error_str or "message can't be edited" in error_str:
-                 logger.error(f"Message {message_id_to_process} or Chat {chat_id} not found/editable for user {user_id}. Forcing send new.")
-                 edit_existing = False
-                 message_id_to_process = None
-                 # Clear message_id in persistent state too
-                 current_session_state_on_fail = context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
-                 if current_session_state_on_fail: current_session_state_on_fail['message_id'] = None
-
-                 current_retry += 1
-                 if current_retry > max_retries or edit_failed_and_sending_new:
-                     logger.error(f"CRITICAL: Failed to send new message after edit failed for user {user_id}. Cleaning session state.")
-                     context.application.user_data.get(user_id, {}).pop(BJ_GAME_KEY, None)
+                logger.warning(f"Message {message_id_to_process} or Chat {chat_id} not found/editable for user {user_id}. Forcing send new.")
+                attempt_edit = False # Don't try editing again
+                edit_failed_and_sending_new = True # Flag that edit failed
+                # Clear message_id in state so next loop iteration sends new
+                current_session_state_on_fail = context.user_data.get(BJ_GAME_KEY)
+                if current_session_state_on_fail:
+                    current_session_state_on_fail['message_id'] = None
+                current_retry += 1 # Consume a retry attempt
+                if current_retry > max_retries:
+                     logger.error(f"CRITICAL: Failed to send new message after edit failed for user {user_id}. Cleaning session.")
+                     context.user_data.pop(BJ_GAME_KEY, None)
                      result = None
                      break
+                # Continue loop to attempt sending new
+            elif "can't parse entities" in error_str:
+                logger.error(f"HTML Parsing Error for user {user_id} (msg {message_id_to_process}): {e}\nText snippet: {text[:200]}...")
+                result = None # Abort, cannot fix text here easily
+                break
             elif "message text is empty" in error_str:
-                 logger.error(f"BJ show_state: Attempted to send empty message for user {user_id}. Text: '{text}'")
-                 result = None
-                 break # Cannot recover
+                logger.error(f"BJ show_state: Attempted to send empty message for user {user_id}. Text: '{text}'")
+                result = None # Abort
+                break
             else:
-                logger.warning(f"Edit/Send BJ state failed for user {user_id} (msg {message_id_to_process}) (try {current_retry+1}): {e}")
+                # Other BadRequest errors, retry might help
+                logger.warning(f"Edit/Send BJ state BadRequest for user {user_id} (msg {message_id_to_process}) (try {current_retry+1}): {e}")
                 result = None
                 current_retry += 1
-                await asyncio.sleep(0.5)
-
+                await asyncio.sleep(0.5 * current_retry) # Backoff slightly
         except Forbidden as e:
             logger.error(f"Forbidden error for user {user_id} in chat {chat_id}: {e}")
-            context.application.user_data.get(user_id, {}).pop(BJ_GAME_KEY, None)
+            context.user_data.pop(BJ_GAME_KEY, None) # Clean up state if forbidden
             result = None
             break
         except Exception as e:
             logger.error(f"Unexpected error in blackjack_show_state for user {user_id} (try {current_retry+1}): {e}", exc_info=True)
             result = None
             current_retry += 1
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5 * current_retry) # Backoff slightly
 
-    if result is None and not is_new_send:
-        logger.error(f"Failed to update BJ state for user {user_id} after retries.")
-    elif result is None and is_new_send:
-         logger.error(f"Failed to send initial/new BJ state for user {user_id} after potential edit failure.")
+    if result is None:
+        logger.error(f"Failed to update/send BJ state for user {user_id} after {max_retries+1} attempts.")
+        # Optionally try sending a basic error message if state update failed critically
+        # if not isinstance(result, (Message, int)): # Check if it really failed
+        #    try: await context.bot.send_message(chat_id, "⚠️ Ошибка обновления отображения игры.")
+        #    except Exception: pass
 
     return result
 
-async def blackjack_handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: list):
-    q = update.callback_query
-    u = q.from_user
-    uid = u.id
-    chat_id = q.message.chat_id
-    # Get the persistent session data
-    bj_session_data = context.user_data.get(BJ_GAME_KEY, {})
 
-    # --- Basic Validation ---
-    if len(parts) < 2: # Expecting ['action', 'hand_index']
-        logger.warning(f"Invalid action parts received: {parts} for user {uid}")
-        await q.answer("Ошибка: Неверный формат действия.", show_alert=True)
+async def blackjack_handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE, parts: list[str]):
+    """Handles player actions: Hit, Stand, Double, Split."""
+    query = update.callback_query
+    if not query or not query.message or not query.from_user: return
+
+    user = query.from_user
+    user_id = user.id
+    chat_id = query.message.chat_id
+    action_message_id = query.message.message_id
+
+    # Extract action and hand index
+    if len(parts) < 2:
+        await query.answer("Ошибка: Неверный формат действия.", show_alert=True)
         return
-
     action, hand_index_str = parts[0], parts[1]
     try:
         hand_index = int(hand_index_str)
     except (ValueError, TypeError):
-        logger.warning(f"Invalid hand index received: {hand_index_str} for user {uid}")
-        await q.answer("Ошибка: Неверный индекс руки.", show_alert=True)
+        await query.answer("Ошибка: Неверный индекс руки.", show_alert=True)
         return
 
-    action_message_id = q.message.message_id # Message where the button was pressed
-
-    # --- Game State Validation ---
-    # Check overall session state and message ID
-    if not bj_session_data or bj_session_data.get('state') != 'player_turn' or bj_session_data.get('message_id') != action_message_id:
-        await q.answer("Эта игра или действие больше неактивны.", show_alert=False)
-        current_game_state = context.user_data.get(BJ_GAME_KEY, {})
-        if current_game_state.get('message_id') == action_message_id:
-             try:
-                 await context.bot.edit_message_reply_markup(chat_id=chat_id, message_id=action_message_id, reply_markup=None)
-             except Exception: pass # Ignore if removal fails
+    # --- Validate State ---
+    bj_session_data = context.user_data.get(BJ_GAME_KEY, {})
+    if not bj_session_data:
+        await query.answer("Игра не найдена.", show_alert=True)
+        try: await query.edit_message_reply_markup(reply_markup=None)
+        except Exception: pass
+        return
+    if bj_session_data.get('state') != 'player_turn':
+        await query.answer("Сейчас не ваш ход.", show_alert=False)
+        return
+    if bj_session_data.get('message_id') != action_message_id:
+        await query.answer("Эта игра или действие больше неактивны.", show_alert=False)
+        try: await query.edit_message_reply_markup(reply_markup=None)
+        except Exception: pass
         return
 
     player_hands = bj_session_data.get('player_hands', [])
-    # Check if the hand index is valid and if it's the current hand's turn
+    # Check if the index is valid and corresponds to the currently active hand
     if not (0 <= hand_index < len(player_hands)) or hand_index != bj_session_data.get('current_hand_index', -1):
-        await q.answer("Сейчас ход другой руки.", show_alert=False)
+        await query.answer("Сейчас ход другой руки.", show_alert=False)
         return
 
     current_hand_data = player_hands[hand_index]
-    # Check if the hand is actually active
+    # Check if the hand data is valid and the status is 'active'
     if not isinstance(current_hand_data, dict) or current_hand_data.get('status') != 'active':
-        await q.answer("Эта рука неактивна для действий.", show_alert=False)
+        await query.answer("Эта рука неактивна для действий.", show_alert=False)
         return
 
-    # --- Prepare Action Variables ---
+    # --- Prepare for Action ---
     hand = current_hand_data.get('hand', [])
-    # >>> Get the persistent deck <<<
     deck_to_draw_from = bj_session_data.get('persistent_deck')
     if deck_to_draw_from is None:
-        logger.error(f"Persistent deck missing during action '{action}' for user {uid}")
-        await q.answer("Критическая ошибка: Колода не найдена!", show_alert=True)
+        logger.error(f"Persistent deck missing during action '{action}' for user {user_id}")
+        await query.answer("Критическая ошибка: Колода не найдена!", show_alert=True)
         context.user_data.pop(BJ_GAME_KEY, None)
+        try: await query.edit_message_reply_markup(reply_markup=None)
+        except Exception: pass
         return
 
-    balance = get_balance(uid) # Get current balance for checks
+    balance = get_balance(user_id)
     bet = current_hand_data.get('bet', 0)
-    needs_state_update = False # Flag to update message at the end
-    move_to_next = False # Flag to trigger moving to next hand/dealer
+    needs_state_update = False # Flag to update display
+    move_to_next_hand_or_dealer = False # Flag to trigger next step
 
     # --- Execute Action ---
     try:
         if action == 'hit':
-            card = draw_card(deck_to_draw_from) # Draw from persistent deck
+            card = draw_card(deck_to_draw_from)
             if card:
                 hand.append(card)
-                current_hand_data['can_double'] = False
-                current_hand_data['can_split'] = False
+                current_hand_data['can_double'] = False # Cannot double after hit
+                current_hand_data['can_split'] = False # Cannot split after hit
                 hand_value = get_hand_value(hand)
-                await q.answer(f"Взяли: {card[0]}{card[1]}")
+                await query.answer(f"Взяли: {card[0]}{card[1]}")
                 needs_state_update = True
                 if hand_value > 21:
                     current_hand_data['status'] = 'bust'
-                    move_to_next = True
+                    move_to_next_hand_or_dealer = True
                 elif hand_value == 21:
+                    # Auto-stand on 21 after hit
                     current_hand_data['status'] = 'stand'
-                    move_to_next = True
+                    move_to_next_hand_or_dealer = True
             else:
+                # Deck empty during hit
                 raise IndexError("Draw fail (deck empty or error)")
 
         elif action == 'stand':
             current_hand_data['status'] = 'stand'
-            await q.answer("Стоп.")
+            await query.answer("Стоп.")
             needs_state_update = True
-            move_to_next = True
+            move_to_next_hand_or_dealer = True
 
         elif action == 'double':
-            can_double = (
-                current_hand_data.get('can_double', False) and
-                len(hand) == 2 and
-                balance is not None and balance >= bet
-            )
-            if can_double:
-                new_balance = update_balance(uid, -bet)
+            can_double_flag = current_hand_data.get('can_double', False)
+            can_afford = balance is not None and balance >= bet
+            if can_double_flag and can_afford:
+                new_balance = update_balance(user_id, -bet) # Deduct additional bet
                 if new_balance is not None:
                     current_hand_data['bet'] += bet
-                    current_hand_data['can_double'] = False
+                    current_hand_data['can_double'] = False # Can only double once
                     current_hand_data['can_split'] = False
-                    balance = new_balance
+                    balance = new_balance # Update local balance copy
 
-                    card = draw_card(deck_to_draw_from) # Draw from persistent deck
+                    card = draw_card(deck_to_draw_from)
                     drawn_card_str = ""
                     if card:
                         hand.append(card)
                         hand_value = get_hand_value(hand)
-                        current_hand_data['status'] = 'bust' if hand_value > 21 else 'stand'
+                        current_hand_data['status'] = 'bust' if hand_value > 21 else 'stand' # Double stands after 1 card
                         drawn_card_str = f" Карта: {card[0]}{card[1]}. Итог: {hand_value}{' (Перебор!)' if hand_value > 21 else ''}"
                     else:
+                        # Deck empty on double draw - treat as stand? Or error? Let's stand.
                         current_hand_data['status'] = 'stand'
-                        drawn_card_str = " Ошибка взятия карты."
-                        logger.warning(f"BJ double failed draw for user {uid}")
+                        drawn_card_str = " Ошибка взятия карты (колода пуста?)."
+                        logger.warning(f"BJ double failed draw for user {user_id}")
 
-                    await q.answer(f"Удвоено!{drawn_card_str}", show_alert=("Ошибка" in drawn_card_str))
+                    await query.answer(f"Удвоено!{drawn_card_str}", show_alert=("Ошибка" in drawn_card_str))
                     needs_state_update = True
-                    move_to_next = True
+                    move_to_next_hand_or_dealer = True # Doubling ends turn for the hand
                 else:
-                    await q.answer("Ошибка списания средств для удвоения.", show_alert=True)
+                    await query.answer("Ошибка списания средств для удвоения.", show_alert=True)
             else:
-                await q.answer("Удвоить сейчас нельзя.", show_alert=True)
+                reason = "недостаточно средств" if not can_afford else "удвоить сейчас нельзя"
+                await query.answer(f"Нельзя удвоить ({reason}).", show_alert=True)
 
         elif action == 'split':
-            can_split = (
-                 len(hand) == 2 and
-                 hand[0] and hand[1] and get_card_value(hand[0]) == get_card_value(hand[1]) and
-                 balance is not None and balance >= bet and
-                 bj_session_data.get('split_count', 0) < MAX_SPLITS
-             )
-            current_hand_data['can_split'] = can_split
+            can_split_flag = current_hand_data.get('can_split', False)
+            # Re-verify conditions fully before executing
+            can_afford = balance is not None and balance >= bet
+            split_count = bj_session_data.get('split_count', 0)
+            is_pair = (len(hand) == 2 and hand[0] and hand[1] and
+                       get_card_value(hand[0]) == get_card_value(hand[1]))
 
-            if can_split:
-                new_balance = update_balance(uid, -bet)
+            if can_split_flag and is_pair and can_afford and split_count < MAX_SPLITS:
+                new_balance = update_balance(user_id, -bet) # Deduct bet for new hand
                 if new_balance is not None:
-                    bj_session_data['split_count'] = bj_session_data.get('split_count', 0) + 1
-                    balance = new_balance
+                    bj_session_data['split_count'] = split_count + 1
+                    balance = new_balance # Update local balance
 
-                    card_to_move = hand.pop()
+                    # Perform the split
+                    card_to_move = hand.pop() # Take second card for the new hand
                     new_hand_data = {
-                        'hand': [card_to_move], 'bet': bet, 'status': 'active',
-                        'can_double': False, 'can_split': False
+                        'hand': [card_to_move], # Start new hand with the moved card
+                        'bet': bet,
+                        'status': 'active',
+                        'can_double': False, # Will be set after drawing
+                        'can_split': False
                     }
 
-                    # Draw from persistent deck
-                    cards_drawn = [draw_card(deck_to_draw_from), draw_card(deck_to_draw_from)]
-                    drawn_count = 0
+                    # Draw one card for each hand
+                    card1 = draw_card(deck_to_draw_from)
+                    card2 = draw_card(deck_to_draw_from)
 
-                    if cards_drawn[0]: hand.append(cards_drawn[0]); drawn_count += 1
-                    if cards_drawn[1]: new_hand_data['hand'].append(cards_drawn[1]); drawn_count += 1
+                    # Check if draws were successful
+                    if card1 and card2:
+                        hand.append(card1) # Add card to original hand
+                        new_hand_data['hand'].append(card2) # Add card to new hand
 
-                    if drawn_count < 2:
-                        logger.warning(f"BJ split failed to draw both cards for user {uid}. Deck empty?")
-                        current_hand_data['status'] = 'stand'
-                        update_balance(uid, bet) # Refund
-                        bj_session_data['split_count'] -= 1
-                        hand.append(card_to_move) # Put card back
-                        await q.answer("Ошибка разделения: не хватило карт! Ставка возвращена.", show_alert=True)
-                        needs_state_update = True
-                        move_to_next = True
-                        current_hand_data['can_double'] = (len(hand) == 2)
-                    else:
+                        # Insert the new hand *after* the current one
                         player_hands.insert(hand_index + 1, new_hand_data)
 
-                        is_ace_split = get_card_value(hand[0] if hand and hand[0] else None) == 11
+                        # Special rule for splitting Aces: Each Ace gets only one card and stands
+                        is_ace_split = get_card_value(hand[0]) == 11 # Check original card value
 
                         if is_ace_split:
                             current_hand_data['status'] = 'stand'
                             new_hand_data['status'] = 'stand'
-                            current_hand_data['can_double'] = False
+                            current_hand_data['can_double'] = False # No actions after Ace split
                             new_hand_data['can_double'] = False
-                            await q.answer("Тузы разделены и стоят.")
-                            needs_state_update = True
-                            # move_to_next handled by job
+                            await query.answer("Тузы разделены и стоят.")
+                            # Move to next hand immediately will be handled by job
+                            move_to_next_hand_or_dealer = True
                         else:
+                            # Check for Blackjack on either hand after split (counts as 21, not BJ)
                             if get_hand_value(hand) == 21: current_hand_data['status'] = 'stand'
                             if get_hand_value(new_hand_data['hand']) == 21: new_hand_data['status'] = 'stand'
 
-                            current_hand_data['can_double'] = (len(hand) == 2 and current_hand_data['status'] == 'active')
-                            new_hand_data['can_double'] = (len(new_hand_data['hand']) == 2 and new_hand_data['status'] == 'active')
+                            # Determine if hands can be doubled or re-split
+                            current_balance_after_split = balance # Use updated balance
+                            limit_ok_for_resplit = bj_session_data.get('split_count', 0) < MAX_SPLITS
 
-                            limit_ok = bj_session_data.get('split_count', 0) < MAX_SPLITS
-                            current_balance_after_split = balance
-                            chd_can_resplit = (
-                                current_hand_data['status'] == 'active' and len(hand) == 2 and hand[0] and hand[1] and
-                                get_card_value(hand[0]) == get_card_value(hand[1]) and limit_ok and
-                                current_balance_after_split >= current_hand_data['bet']
-                            )
-                            nhd_can_resplit = (
-                                new_hand_data['status'] == 'active' and len(new_hand_data['hand']) == 2 and new_hand_data['hand'][0] and new_hand_data['hand'][1] and
-                                get_card_value(new_hand_data['hand'][0]) == get_card_value(new_hand_data['hand'][1]) and limit_ok and
-                                current_balance_after_split >= new_hand_data['bet']
-                            )
-                            current_hand_data['can_split'] = chd_can_resplit
-                            new_hand_data['can_split'] = nhd_can_resplit
+                            # Check can_double for original hand
+                            current_hand_data['can_double'] = (current_hand_data['status'] == 'active' and
+                                                               len(hand) == 2 and
+                                                               current_balance_after_split >= current_hand_data['bet'])
+                            # Check can_split for original hand (re-split)
+                            current_hand_data['can_split'] = (current_hand_data['status'] == 'active' and
+                                                             len(hand) == 2 and hand[0] and hand[1] and
+                                                             get_card_value(hand[0]) == get_card_value(hand[1]) and
+                                                             limit_ok_for_resplit and
+                                                             current_balance_after_split >= current_hand_data['bet'])
 
-                            await q.answer("Рука разделена!")
-                            needs_state_update = True
-                            if current_hand_data['status'] == 'stand': move_to_next = True
+                             # Check can_double for new hand
+                            new_hand_data['can_double'] = (new_hand_data['status'] == 'active' and
+                                                           len(new_hand_data['hand']) == 2 and
+                                                           current_balance_after_split >= new_hand_data['bet'])
+                            # Check can_split for new hand (re-split)
+                            new_hand_data['can_split'] = (new_hand_data['status'] == 'active' and
+                                                          len(new_hand_data['hand']) == 2 and new_hand_data['hand'][0] and new_hand_data['hand'][1] and
+                                                          get_card_value(new_hand_data['hand'][0]) == get_card_value(new_hand_data['hand'][1]) and
+                                                          limit_ok_for_resplit and
+                                                          current_balance_after_split >= new_hand_data['bet'])
+
+                            await query.answer("Рука разделена!")
+                            # If the *first* hand stood immediately (e.g. got 21), move to next
+                            if current_hand_data['status'] == 'stand':
+                                 move_to_next_hand_or_dealer = True
+                        needs_state_update = True
+
+                    else:
+                        # Draw failed (deck likely empty) - Undo split
+                        logger.warning(f"BJ split failed to draw both cards for user {user_id}. Deck empty? Undoing.")
+                        hand.append(card_to_move) # Put card back
+                        bj_session_data['split_count'] -= 1 # Decrement count
+                        update_balance(user_id, bet) # Refund the split bet
+                        # Re-evaluate original hand's double/split possibility if needed?
+                        current_hand_data['can_split'] = True # Allow trying again maybe? Or just error out.
+                        await query.answer("Ошибка разделения: не хватило карт! Ставка возвращена.", show_alert=True)
+                        needs_state_update = True # Show state without split
+
                 else:
-                    await q.answer("Ошибка списания средств для разделения.", show_alert=True)
+                    await query.answer("Ошибка списания средств для разделения.", show_alert=True)
             else:
-                await q.answer("Разделить сейчас нельзя.", show_alert=True)
+                 reason = "не пара" if not is_pair else \
+                          "недостаточно средств" if not can_afford else \
+                          f"макс. сплитов ({MAX_SPLITS})" if split_count >= MAX_SPLITS else \
+                          "разделить сейчас нельзя"
+                 await query.answer(f"Нельзя разделить ({reason}).", show_alert=True)
 
     except IndexError as e:
-        logger.warning(f"BJ action '{action}' user {uid} failed draw: {e}")
-        current_hand_data['status'] = 'stand'
-        await q.answer("Не удалось взять карту! Ход завершен.", show_alert=True)
+        # Deck empty during draw
+        logger.warning(f"BJ action '{action}' user {user_id} failed draw: {e}")
+        current_hand_data['status'] = 'stand' # Force stand if draw fails
+        await query.answer("Не удалось взять карту (колода пуста?)! Ход завершен.", show_alert=True)
         needs_state_update = True
-        move_to_next = True
+        move_to_next_hand_or_dealer = True
     except Exception as e:
-        logger.error(f"BJ action '{action}' user {uid} unexpected error: {e}", exc_info=True)
-        await q.answer("Произошла непредвиденная ошибка.", show_alert=True)
+        logger.error(f"BJ action '{action}' user {user_id} unexpected error: {e}", exc_info=True)
+        await query.answer("Произошла непредвиденная ошибка.", show_alert=True)
+        # Try to recover by standing the hand
         current_hand_data['status'] = 'stand'
         needs_state_update = True
-        move_to_next = True
+        move_to_next_hand_or_dealer = True
 
-    # --- Update Display and Move Turn ---
+    # --- Update Display ---
     if needs_state_update:
-        # Pass the entire session data to show_state
-        update_result = await blackjack_show_state(context, chat_id, uid, game_state=bj_session_data, edit_existing=True)
-        if not update_result:
-             logger.error(f"Failed to update state message after action '{action}' for user {uid}. Game might be stuck.")
-             try:
-                 await context.bot.send_message(chat_id, "⚠️ Ошибка обновления отображения игры. Состояние может быть некорректным.")
-             except Exception: pass
+        update_result = await blackjack_show_state(context, chat_id, user_id, game_state=bj_session_data, edit_existing=True)
+        if update_result is None: # Check if update failed
+            logger.error(f"Failed to update state message after action '{action}' for user {user_id}. Game might be stuck.")
+            try:
+                 # Send a message indicating error if edit failed
+                 await context.bot.send_message(chat_id, "⚠️ Ошибка обновления отображения игры после действия.")
+            except Exception: pass
+            # Potentially end the game here if UI is broken? Or just log.
 
-    # Check hand[0] exists before accessing value
-    is_ace_split_action = (action == 'split' and len(hand) == 2 and hand[0] and get_card_value(hand[0]) == 11)
-
-    if move_to_next or is_ace_split_action:
+    # --- Trigger Next Action (if needed) ---
+    # Use job queue to avoid issues with nested callbacks or long-running tasks
+    if move_to_next_hand_or_dealer:
+        job_name = f"bj_next_action_{user_id}_{action_message_id}_{hand_index}" # Unique job name
         context.job_queue.run_once(
-            blackjack_next_action_job, when=0.1,
-            data={'chat_id': chat_id, 'user_id': uid},
-            name=f"next_action_{uid}_{action_message_id}"
+            blackjack_next_action_job,
+            when=0.1, # Short delay
+            data={'chat_id': chat_id, 'user_id': user_id, 'message_id': action_message_id},
+            name=job_name
         )
 
 
 async def blackjack_next_action_job(context: ContextTypes.DEFAULT_TYPE):
     """Job queue callback to trigger moving to the next hand or dealer."""
-    job_data = context.job.data
+    job_data = context.job.data if context.job else {}
     user_id = job_data.get('user_id')
     chat_id = job_data.get('chat_id')
-    if user_id and chat_id:
-        await blackjack_next_action(context, chat_id, user_id)
+    message_id = job_data.get('message_id') # Pass message_id for validation
+
+    if user_id and chat_id and message_id:
+        # Pass message_id to the actual logic function
+        await blackjack_next_action(context, chat_id, user_id, message_id)
     else:
         logger.error(f"Missing data in blackjack_next_action_job: {job_data}")
 
 
-async def blackjack_next_action(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
+async def blackjack_next_action(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, expected_message_id: int):
     """Moves to the next player hand or starts the dealer's turn."""
-    # Get persistent session data
-    bj_session_data = context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
+    bj_session_data = context.user_data.get(BJ_GAME_KEY)
 
+    # --- Validations ---
     if not bj_session_data:
         logger.info(f"BJ next_action (job) for user {user_id}: Game session state not found. Aborting.")
         return
+    if bj_session_data.get('message_id') != expected_message_id:
+         logger.warning(f"BJ next_action (job) for user {user_id}: Message ID mismatch ({bj_session_data.get('message_id')} vs {expected_message_id}). Aborting.")
+         return
     if bj_session_data.get('state') != 'player_turn':
+        # This might happen if multiple actions trigger jobs close together
         logger.info(f"BJ next_action (job) for user {user_id}: Game state is not 'player_turn' ({bj_session_data.get('state')}). Aborting.")
         return
 
@@ -1368,42 +1614,39 @@ async def blackjack_next_action(context: ContextTypes.DEFAULT_TYPE, chat_id: int
             next_active_idx = i
             break
 
-    message_id = bj_session_data.get('message_id')
-    if not message_id:
-        logger.error(f"BJ next_action: No message_id for user {user_id}. Cannot proceed.")
-        context.application.user_data.get(user_id, {}).pop(BJ_GAME_KEY, None) # Clean up
-        return
-
     if next_active_idx != -1:
         # --- Move to Next Player Hand ---
         bj_session_data['current_hand_index'] = next_active_idx
         logger.info(f"BJ user {user_id}: Moving to next active hand index {next_active_idx}")
         await blackjack_show_state(context, chat_id, user_id, game_state=bj_session_data, edit_existing=True)
     else:
-        # --- All Player Hands Finished - Move to Dealer ---
+        # --- All Player Hands Finished, Start Dealer's Turn ---
         logger.info(f"BJ user {user_id}: All player hands done, moving to dealer's turn.")
         bj_session_data['state'] = 'dealer_turn'
 
+        # Update display to show "Dealer's Turn" message and reveal dealer hand if needed
         update_success = await blackjack_show_state(context, chat_id, user_id, game_state=bj_session_data, edit_existing=True)
 
-        if not update_success:
+        if update_success is None: # Check if showing state failed
             logger.error(f"BJ user {user_id}: Failed to update state to 'dealer_turn'. Aborting dealer job.")
             try: await context.bot.send_message(chat_id, "⚠️ Ошибка! Не удалось перейти к ходу дилера.")
             except Exception: pass
-            context.application.user_data.get(user_id, {}).pop(BJ_GAME_KEY, None) # Clean up
+            context.user_data.pop(BJ_GAME_KEY, None) # Clean up broken game
             return
 
+        # Schedule the dealer's turn logic via job queue
+        dealer_job_name = f"bj_dealer_turn_{user_id}_{expected_message_id}"
         context.job_queue.run_once(
             blackjack_dealer_turn_job,
-            DEALER_TURN_DELAY,
-            data={'chat_id': chat_id, 'user_id': user_id, 'message_id': message_id},
-            name=f"dealer_turn_{user_id}_{message_id}"
+            DEALER_TURN_DELAY, # Initial delay before dealer acts
+            data={'chat_id': chat_id, 'user_id': user_id, 'message_id': expected_message_id},
+            name=dealer_job_name
         )
 
 
 async def blackjack_dealer_turn_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job queue callback to execute the dealer's turn."""
-    job_data = context.job.data
+    """Job queue callback to execute the dealer's turn logic."""
+    job_data = context.job.data if context.job else {}
     user_id = job_data.get('user_id')
     chat_id = job_data.get('chat_id')
     message_id = job_data.get('message_id')
@@ -1412,10 +1655,8 @@ async def blackjack_dealer_turn_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"BJ Dealer job missing required data: {job_data}")
         return
 
-    # Get the persistent session data
-    bj_session_data = context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
-
-    # --- Pre-computation Checks ---
+    # --- Validations ---
+    bj_session_data = context.user_data.get(BJ_GAME_KEY)
     if not bj_session_data:
         logger.info(f"BJ Dealer job for user {user_id} (msg {message_id}): Game state not found. Job aborted.")
         return
@@ -1429,130 +1670,145 @@ async def blackjack_dealer_turn_job(context: ContextTypes.DEFAULT_TYPE):
     # --- Dealer Logic ---
     deck_to_draw_from = bj_session_data.get('persistent_deck')
     if deck_to_draw_from is None:
-         logger.error(f"Persistent deck missing during dealer turn for user {user_id}")
-         await blackjack_determine_outcome(context, chat_id, user_id, False, error_message="Критическая ошибка: Колода дилера не найдена!")
-         context.user_data.pop(BJ_GAME_KEY, None) # Clean broken state
-         return
+        logger.error(f"Persistent deck missing during dealer turn for user {user_id}")
+        # Determine outcome with error message
+        await blackjack_determine_outcome(context, chat_id, user_id, False, error_message="Критическая ошибка: Колода дилера не найдена!")
+        # No need to pop BJ_GAME_KEY here, outcome handles state reset
+        return
 
     dealer_hand = bj_session_data.get('dealer_hand', [])
     player_hands = bj_session_data.get('player_hands', [])
 
-    is_initial_dealer_deal = (len(dealer_hand) == 2)
-    dealer_value_initial = get_hand_value(dealer_hand)
-    # Approximate check for initial BJ
-    dealer_had_initial_blackjack = (is_initial_dealer_deal and dealer_value_initial == 21)
-
+    # Check if any player hand is still potentially winnable (not bust)
+    # Dealer only hits if there's a player hand that hasn't busted.
     player_can_win = any(
-        isinstance(h, dict) and h.get('status') not in ['bust', 'blackjack']
+        isinstance(h, dict) and h.get('status') not in ['bust', 'blackjack'] # Player BJ already paid
         for h in player_hands
     )
-    # Dealer hits until 17+, respecting soft 17 rule
-    dealer_needs_to_hit = player_can_win # Dealer hits if player could potentially win
 
     dealer_stood = False
     hit_occurred = False
 
-    if dealer_needs_to_hit:
-        logger.info(f"BJ Dealer user {user_id} starts hitting sequence.")
+    # Reveal hidden card first (already done by show_state in next_action)
+
+    if player_can_win:
+        logger.info(f"BJ Dealer user {user_id}: At least one player hand active. Dealer starts hitting sequence.")
         while not dealer_stood:
             current_dealer_value = get_hand_value(dealer_hand)
             num_aces = sum(1 for c in dealer_hand if c and c[0] == 'A')
-            is_soft = num_aces > 0 and (current_dealer_value - (num_aces * 10)) <= 11
+            # Check for soft hand (Ace counted as 11 without busting)
+            is_soft = num_aces > 0 and (current_dealer_value <= 21) and \
+                      (get_hand_value([c for c in dealer_hand if c[0] != 'A'] + [('A', '')] * (num_aces-1) if num_aces > 0 else []) + 1 <= 11)
 
-            # Dealer Stand Rules check
+
             should_stand = False
             if current_dealer_value > 17:
                 should_stand = True
             elif current_dealer_value == 17:
-                 if not (is_soft and DEALER_HITS_SOFT_17): # Stand on hard 17, or soft 17 if rule says so
-                     should_stand = True
+                # Stand on hard 17, Hit or Stand on soft 17 based on rule
+                if not (is_soft and DEALER_HITS_SOFT_17):
+                    should_stand = True
 
             if should_stand:
                 log_msg = f"stands initially on {current_dealer_value}" if not hit_occurred else f"stands on {current_dealer_value}"
-                if is_soft and current_dealer_value==17 : log_msg += " (soft)"
+                if is_soft and current_dealer_value == 17: log_msg += " (soft)"
                 logger.info(f"BJ Dealer user {user_id} {log_msg}.")
                 dealer_stood = True
-                break # Exit hit loop
+                # No state update needed here yet, just break loop
+                break # Exit the while loop
 
-            # If not standing, dealer hits
+            # --- Dealer Hits ---
             logger.info(f"BJ Dealer user {user_id} hits on {current_dealer_value}{' (soft)' if is_soft else ''}.")
-            card = draw_card(deck_to_draw_from) # Draw from persistent deck
+            hit_occurred = True
+            card = draw_card(deck_to_draw_from)
+
             if card:
                 dealer_hand.append(card)
-                hit_occurred = True
-                await asyncio.sleep(DEALER_TURN_DELAY * 0.6)
-                # Update display during hits (optional - can remove if too slow/spammy)
-                # await blackjack_show_state(context, chat_id, user_id, game_state=bj_session_data, edit_existing=True)
+                # Update display incrementally to show dealer hits
+                update_res = await blackjack_show_state(context, chat_id, user_id, game_state=bj_session_data, edit_existing=True)
+                if update_res is None:
+                    logger.error(f"BJ Dealer user {user_id}: Failed to show state after dealer hit. Aborting turn.")
+                    await blackjack_determine_outcome(context, chat_id, user_id, False, error_message="Ошибка отображения хода дилера.")
+                    return # Stop dealer turn
+
+                await asyncio.sleep(DEALER_TURN_DELAY * 0.8) # Pause between hits
             else:
+                # Deck empty during dealer hit
                 logger.warning(f"BJ Dealer user {user_id} failed to draw card (deck empty?). Standing.")
                 dealer_stood = True
-                break # Exit hit loop
-        # End Dealer Hit Loop
+                # Break loop, outcome will be determined with current hand
+                break
     else:
         final_dealer_value_no_hit = get_hand_value(dealer_hand)
-        logger.info(f"BJ Dealer user {user_id}: No player can win or dealer already has >= 17 ({final_dealer_value_no_hit}). Dealer stands immediately.")
-        dealer_stood = True
+        logger.info(f"BJ Dealer user {user_id}: No active player hands. Dealer stands immediately with {final_dealer_value_no_hit}.")
+        dealer_stood = True # Technically stood immediately
 
-    # --- Finalize Dealer Turn ---
+    # --- Dealer Turn Finished ---
     final_dealer_value = get_hand_value(dealer_hand)
-    logger.info(f"BJ Dealer user {user_id}: Finished turn with value {final_dealer_value}. Cards remaining: {len(deck_to_draw_from)}. Updating display before outcome.")
+    logger.info(f"BJ Dealer user {user_id}: Finished turn with value {final_dealer_value}. Cards remaining: {len(deck_to_draw_from)}. Determining outcome.")
 
-    # Show the final dealer hand *before* calculating outcome
-    update_success = await blackjack_show_state(context, chat_id, user_id, game_state=bj_session_data, edit_existing=True)
-
-    if not update_success:
+    # Ensure final dealer hand is displayed *before* outcome calculation shown
+    # (State already shows 'dealer_turn', this reveals final cards if any were drawn)
+    final_show_success = await blackjack_show_state(context, chat_id, user_id, game_state=bj_session_data, edit_existing=True)
+    if final_show_success is None:
         logger.error(f"BJ Dealer user {user_id}: Failed to show final dealer hand. Determining outcome anyway.")
-        # Proceed to determine outcome, but pass error info
-        await blackjack_determine_outcome(context, chat_id, user_id, dealer_had_initial_blackjack, error_message="Ошибка отображения хода дилера.")
-        return
+        # Proceed to outcome determination even if final display failed
 
-    await asyncio.sleep(DEALER_TURN_DELAY * 0.8)
+    await asyncio.sleep(DEALER_TURN_DELAY * 0.5) # Short pause before showing results
+
+    # Determine outcome based on final hands
+    dealer_had_initial_blackjack = (len(dealer_hand) == 2 and final_dealer_value == 21 and not hit_occurred) # Check if BJ was from start
     await blackjack_determine_outcome(context, chat_id, user_id, dealer_had_initial_blackjack)
 
 
-async def blackjack_determine_outcome(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, d_had_bj: bool, error_message: str | None = None):
-    """Calculates winnings, updates balance, displays final outcome, and resets for next bet."""
-    # Get persistent session data
-    bj_session_data = context.application.user_data.get(user_id, {}).get(BJ_GAME_KEY)
-
+async def blackjack_determine_outcome(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int,
+    dealer_had_blackjack: bool, # Was dealer's 21 from initial deal?
+    error_message: str | None = None # Optional error message for forced refund
+    ):
+    """Calculates winnings, updates balance, displays final outcome, and resets state."""
+    bj_session_data = context.user_data.get(BJ_GAME_KEY)
     if not bj_session_data:
         logger.warning(f"BJ outcome user {user_id}: Game session data not found.")
         return
 
-    message_id = bj_session_data.get('message_id') # Get message ID for final update
+    message_id = bj_session_data.get('message_id')
+    # We need a message ID to show the result, but don't abort if missing, just log.
     if not message_id:
-        logger.error(f"BJ outcome user {user_id}: No message_id found in session data.")
-        return
+        logger.error(f"BJ outcome user {user_id}: No message_id found in session data. Result cannot be displayed by editing.")
+        # We can still calculate and update balance, but UI will be broken.
 
-    # Prevent double execution if outcome already determined for this hand/round logic
-    if bj_session_data.get('outcome_determined'):
-        logger.info(f"BJ outcome user {user_id}: Outcome previously determined. Skipping redundant calculation.")
+    # Prevent double processing if somehow triggered twice
+    if bj_session_data.get('outcome_determined', False) and not error_message:
+        logger.info(f"BJ outcome user {user_id}: Outcome previously determined. Skipping calculation.")
+        # Ensure state is ready for next round if needed
+        bj_session_data['state'] = 'waiting_bet'
         return
 
     player_hands = bj_session_data.get('player_hands', [])
     dealer_hand = bj_session_data.get('dealer_hand', [])
+    outcome_lines = []
+    total_winnings_to_pay = 0.0
+    total_bets_placed = 0.0 # Sum of all bets across all hands
 
-    # Handle case where dealer turn failed (e.g., deck error passed via error_message)
     if error_message:
-        outcome_lines = [f"<b>{error_message}</b>"]
-        total_winnings_to_pay = 0
-        total_initial_bet_sum = sum(h.get('bet', 0) for h in player_hands if isinstance(h, dict))
-        # Refund all bets on critical error
+        # --- Handle Forced Refund due to Error ---
+        outcome_lines.append(f"<b>{html_escape(error_message)}</b>")
         for i, hand_data in enumerate(player_hands):
             if isinstance(hand_data, dict):
                 bet = hand_data.get('bet', 0)
-                total_winnings_to_pay += bet # Add bet amount to be returned
+                total_bets_placed += bet # Track original bet for refund calc
+                total_winnings_to_pay += bet # Amount to refund is the bet itself
                 prefix = f"Рука {i+1}: " if len(player_hands) > 1 else ""
-                outcome_lines.append(f"{prefix}Ставка {bet} F возвращена из-за ошибки.")
-        logger.error(f"BJ outcome user {user_id}: Critical error '{error_message}'. Refunding bets totalling {total_winnings_to_pay} F.")
+                outcome_lines.append(f"{prefix}Ставка {bet:.2f} F возвращена из-за ошибки.")
+        logger.error(f"BJ outcome user {user_id}: Critical error '{error_message}'. Refunding bets totalling {total_winnings_to_pay:.2f} F.")
 
     else:
-        # Normal outcome calculation
+        # --- Normal Outcome Calculation ---
         dealer_final_value = get_hand_value(dealer_hand)
         dealer_busted = dealer_final_value > 21
-        outcome_lines = []
-        total_winnings_to_pay = 0
-        total_initial_bet_sum = 0
 
         for i, hand_data in enumerate(player_hands):
             if not isinstance(hand_data, dict): continue
@@ -1561,405 +1817,445 @@ async def blackjack_determine_outcome(context: ContextTypes.DEFAULT_TYPE, chat_i
             bet = hand_data.get('bet', 0)
             status = hand_data.get('status')
             player_value = get_hand_value(hand)
-            # Check if player had BJ on initial deal (status is 'blackjack')
+            # Player had BJ only if status is 'blackjack' (i.e., from initial deal)
             player_had_blackjack = (status == 'blackjack')
 
-            total_initial_bet_sum += bet
-            payout_amount = 0
+            total_bets_placed += bet # Add this hand's bet to total
+            payout_amount = 0.0 # Net amount won/lost for this hand (0 if push)
+            winnings_paid_this_hand = 0.0 # Amount to return to player (bet + winnings)
             outcome_str = ""
             prefix = f"Рука {i+1}: " if len(player_hands) > 1 else ""
 
             if status == 'bust':
-                outcome_str = f"{prefix}Перебор ({player_value}). Ставка проиграна (-{bet} F)."
-                payout_amount = 0
-            elif player_had_blackjack: # Player got BJ on initial deal
-                if d_had_bj: # Dealer also got BJ
-                    outcome_str = f"{prefix}Блекджек! Ничья с дилером."
-                    payout_amount = bet # Return original bet (push)
-                else: # Player BJ wins
+                outcome_str = f"{prefix}Перебор ({player_value}). Ставка проиграна (-{bet:.2f} F)."
+                payout_amount = -bet
+                winnings_paid_this_hand = 0.0
+            elif player_had_blackjack:
+                 # BJ payout already handled in handle_bet, this just confirms outcome display
+                if dealer_had_blackjack:
+                    outcome_str = f"{prefix}Блекджек! Ничья с дилером (Push)."
+                    payout_amount = 0.0 # Bet was already returned
+                    winnings_paid_this_hand = 0.0 # Already handled
+                else:
                     win_amount = bet * BLACKJACK_PAYOUT
-                    outcome_str = f"{prefix}Блекджек! Выигрыш +{win_amount:.2f} F."
-                    payout_amount = bet + win_amount # Return bet + payout
-            elif d_had_bj: # Dealer had BJ, player didn't
-                outcome_str = f"{prefix}У дилера Блекджек. Ставка проиграна (-{bet} F)."
-                payout_amount = 0
-            elif dealer_busted: # Dealer busted, player didn't bust/BJ
-                outcome_str = f"{prefix}У дилера перебор ({dealer_final_value})! Выигрыш +{bet:.2f} F."
-                payout_amount = bet * 2 # Return bet + 1:1 win
-            elif status == 'stand': # Compare hands only if player stood and nobody busted/BJ
+                    outcome_str = f"{prefix}Блекджек! Выигрыш (+{win_amount:.2f} F)."
+                    payout_amount = win_amount # Net win
+                    winnings_paid_this_hand = 0.0 # Already handled
+            elif dealer_had_blackjack:
+                # Player didn't have BJ, dealer did
+                outcome_str = f"{prefix}У дилера Блекджек. Ставка проиграна (-{bet:.2f} F)."
+                payout_amount = -bet
+                winnings_paid_this_hand = 0.0
+            elif dealer_busted:
+                outcome_str = f"{prefix}У дилера перебор ({dealer_final_value})! Выигрыш (+{bet:.2f} F)."
+                payout_amount = bet
+                winnings_paid_this_hand = bet * 2 # Return original bet + winnings
+            elif status == 'stand':
+                # Compare hands
+                comparison_str = ""
                 if player_value > dealer_final_value:
-                    outcome_str = f"{prefix}Вы выиграли ({player_value} > {dealer_final_value}). Выигрыш +{bet:.2f} F."
-                    payout_amount = bet * 2 # Return bet + 1:1 win
+                    comparison_str = f"({player_value} > {dealer_final_value})"
+                    outcome_str = f"{prefix}Вы выиграли {html_escape(comparison_str)}. Выигрыш (+{bet:.2f} F)."
+                    payout_amount = bet
+                    winnings_paid_this_hand = bet * 2
                 elif player_value == dealer_final_value:
-                    outcome_str = f"{prefix}Ничья ({player_value} = {dealer_final_value}). Ставка возвращена."
-                    payout_amount = bet # Return original bet (push)
+                    comparison_str = f"({player_value} = {dealer_final_value})"
+                    outcome_str = f"{prefix}Ничья {html_escape(comparison_str)} (Push)."
+                    payout_amount = 0.0
+                    winnings_paid_this_hand = bet # Return original bet
                 else: # player_value < dealer_final_value
-                    outcome_str = f"{prefix}Вы проиграли ({player_value} < {dealer_final_value}). Ставка проиграна (-{bet} F)."
-                    payout_amount = 0
-            # else: Should not happen if status is stand/bust/blackjack
+                    comparison_str = f"({player_value} < {dealer_final_value})"
+                    outcome_str = f"{prefix}Вы проиграли {html_escape(comparison_str)}. Ставка проиграна (-{bet:.2f} F)."
+                    payout_amount = -bet
+                    winnings_paid_this_hand = 0.0
+            else:
+                # Should not happen if logic is correct (e.g., hand status 'active')
+                outcome_str = f"{prefix}Неопределенный результат для руки (статус: {status})."
+                logger.error(f"BJ outcome user {user_id}: Unexpected hand status '{status}' for hand {i}")
+                winnings_paid_this_hand = bet # Refund bet in case of error state
 
             outcome_lines.append(outcome_str)
-            total_winnings_to_pay += payout_amount
+            total_winnings_to_pay += winnings_paid_this_hand
 
     # --- Update Balance ---
-    net_change = total_winnings_to_pay - total_initial_bet_sum
-    balance_updated_ok = True
+    # Calculate net change based on winnings to pay vs total bets placed initially
+    # Note: BJ payouts were handled earlier, so total_winnings_to_pay only includes
+    # winnings from regular hands, pushes, and refunds from errors.
+    initial_total_bet_deducted = sum(h.get('initial_bet', h.get('bet', 0)) for h in player_hands if isinstance(h, dict)) # Get initial total bet amount
 
+    # Amount to add back to balance = total_winnings_to_pay
+    # Net change = amount_added_back - initial_total_bet_deducted
+    net_change = total_winnings_to_pay - initial_total_bet_deducted
+
+    balance_updated_ok = True
     if total_winnings_to_pay > 0:
-        current_balance_before_update = get_balance(user_id)
+        current_balance_before_update = get_balance(user_id) # Get balance before final payout
         new_balance = update_balance(user_id, total_winnings_to_pay)
         if new_balance is None:
-            outcome_lines.append("\n<b>❌ ОШИБКА НАЧИСЛЕНИЯ ВЫИГРЫША! ❌</b>")
-            net_change = -total_initial_bet_sum
+            # Payout failed!
+            outcome_lines.append("\n<b>❌ ОШИБКА НАЧИСЛЕНИЯ ВЫИГРЫША! Обратитесь к администратору. ❌</b>")
+            # Recalculate net change assuming payout failed
+            net_change = -initial_total_bet_deducted
             balance_updated_ok = False
-            logger.error(f"BJ outcome user {user_id}: FAILED to update balance with payout {total_winnings_to_pay}. Initial bet sum was {total_initial_bet_sum}. Balance before attempt: {current_balance_before_update}")
+            logger.error(f"BJ outcome user {user_id}: FAILED final balance update. Payout amount: {total_winnings_to_pay:.2f}. Initial Bet Sum: {initial_total_bet_deducted:.2f}. Balance before: {current_balance_before_update}")
         else:
-            logger.info(f"BJ outcome user {user_id}: Balance updated by adding {total_winnings_to_pay:.2f}. Net change for round: {net_change:+.2f}. New Balance: {new_balance:.2f}")
+            logger.info(f"BJ outcome user {user_id}: Final Balance updated +{total_winnings_to_pay:.2f}. Net: {net_change:+.2f}. New Bal: {new_balance:.2f}")
     else:
-        logger.info(f"BJ outcome user {user_id}: No winnings to pay. Net change: {net_change:+.2f}")
+        logger.info(f"BJ outcome user {user_id}: No final winnings to pay. Net change: {net_change:+.2f}")
 
-    # --- Finalize Hand State ---
-    # Store outcome text temporarily for display
+    # --- Prepare Final Display ---
     final_summary = f"\n\n<b>Общий итог раунда: {html_escape(f'{net_change:+.2f}')} F</b>"
     final_outcome_display_text = "\n".join(outcome_lines) + final_summary
+
+    # Mark outcome as processed for display logic in show_state
+    bj_session_data['outcome_determined'] = True
     bj_session_data['outcome_text'] = final_outcome_display_text # Store for show_state
 
-    # --- Reset state for next bet, keeping the persistent deck ---
+    # --- Reset State for Next Round ---
+    # Keep deck, total_cards, threshold, message_id
+    # Set state to 'waiting_bet' to enable 'New Game' button functionality
     bj_session_data['state'] = 'waiting_bet'
-    bj_session_data['outcome_determined'] = True # Mark this hand's outcome as processed *for this call*
     # Clear hand-specific data
     bj_session_data.pop('player_hands', None)
     bj_session_data.pop('dealer_hand', None)
     bj_session_data.pop('current_hand_index', None)
     bj_session_data.pop('split_count', None)
+    bj_session_data.pop('total_winnings_paid', None) # Clear intermediate winnings tracker
 
-    # --- Show Final Result and prepare for next bet ---
+    # --- Show Final Result and 'New Game' button ---
     await blackjack_show_state(
         context, chat_id, user_id,
         game_state=bj_session_data,
-        edit_existing=True,
-        force_game_over_display=True, # Use this flag to show outcome + bet prompt
-        final_outcome_text=final_outcome_display_text
-        )
+        edit_existing=True, # Try editing the last known message
+        force_game_over_display=True, # Ensure game over format is used
+        final_outcome_text=final_outcome_display_text # Pass text directly
+    )
 
-    # Clear the temporary outcome flag and text after displaying it
-    bj_session_data.pop('outcome_determined', None)
-    bj_session_data.pop('outcome_text', None)
-
+    # Note: outcome_determined and outcome_text are cleared inside show_state
+    # when show_final_summary is true.
 
     logger.info(f"BJ hand finished for user {user_id}. State reset to 'waiting_bet'. Deck persists.")
-
-    # Optional: Clean up entire session on critical balance error
-    # if not balance_updated_ok:
-    #     context.application.user_data.get(user_id, {}).pop(BJ_GAME_KEY, None)
-    #     logger.warning(f"BJ game session state cleaned for user {user_id} due to balance update error.")
 
 # --- End of Updated Blackjack Code ---
 
 
 # --- Roulette Game (Full Code, Checked & Updated) ---
 # --- Start of Full Roulette Code ---
-def rl_get_main_menu_keyboard(chat_data: dict, display_name_map: dict) -> InlineKeyboardMarkup:
+
+async def rl_get_display_name_map(context: ContextTypes.DEFAULT_TYPE, user_ids: list[int]) -> dict[int, str]:
+    """Helper to fetch display names for a list of user IDs."""
+    display_name_map = {}
+    if user_ids:
+        try:
+            mention_data_list = await asyncio.gather(*(get_user_mention(context, uid) for uid in user_ids))
+            display_name_map = {uid: mention_data[1] for i, uid in enumerate(user_ids) for mention_data in [mention_data_list[i]]}
+        except Exception as e:
+            logger.error(f"Failed to fetch user display names for roulette: {e}")
+            display_name_map = {uid: f"User_{uid}" for uid in user_ids}
+    return display_name_map
+
+def rl_get_main_menu_keyboard(chat_data: dict, display_name_map: dict[int, str]) -> InlineKeyboardMarkup:
     """Generates the main keyboard for the roulette game state."""
     game_state = chat_data.get(RL_GAME_KEY, {})
     state = game_state.get('state', 'idle')
     active_bets_by_user = game_state.get('active_bets', {})
-    keyboard = []
+    keyboard_rows = []
 
     total_bets_count = sum(len(bets) for bets in active_bets_by_user.values())
-    total_bet_amount = sum(b['amount'] for bets in active_bets_by_user.values() for b in bets)
+    total_bet_amount = sum(b.get('amount', 0) for bets in active_bets_by_user.values() for b in bets if isinstance(b, dict)) # Safer sum
 
-    # Display active bets if any
+    # --- Display Active Bets ---
     if active_bets_by_user:
-         keyboard.append([InlineKeyboardButton("📝 Текущие ставки:", callback_data='rl_noop')]) # Non-clickable header
-         for user_id, bets in active_bets_by_user.items():
-             user_display_name = display_name_map.get(user_id, f"User_{user_id}") # Get display name
-             bet_str = ", ".join([f"{b['value_display']} ({b['amount']}F)" for b in bets])
-             # Truncate long bet strings
-             button_text = f"{user_display_name}: {bet_str}"
-             if len(button_text) > 60: # Max button text length approx 64 bytes
-                 button_text = button_text[:57] + "..."
-             keyboard.append([InlineKeyboardButton(button_text, callback_data='rl_noop')]) # Non-clickable bet display
-         # Summary row
-         keyboard.append([InlineKeyboardButton(
-             f"💰 Общая сумма: {total_bet_amount} F ({total_bets_count}/{RL_MAX_BETS_PER_ROUND} ставок)",
-             callback_data='rl_noop'
-         )])
-         keyboard.append([InlineKeyboardButton("---", callback_data='rl_noop')]) # Separator
+        keyboard_rows.append([InlineKeyboardButton("📝 Текущие ставки:", callback_data='rl_noop')]) # Non-clickable header
+        for user_id, bets in active_bets_by_user.items():
+            # Use display name from the pre-fetched map
+            user_display_name = display_name_map.get(user_id, f"User_{user_id}")
+            # Format bets, ensure 'amount' exists
+            bet_parts = [f"{b.get('value_display', '?')} ({b.get('amount', 0)}F)" for b in bets if isinstance(b, dict)]
+            bet_str = ", ".join(bet_parts)
+
+            # Truncate long bet strings for button text limits (approx 64 bytes)
+            button_text = f"{user_display_name}: {bet_str}"
+            max_len = 60
+            if len(button_text.encode('utf-8')) > max_len: # Check byte length
+                 # Simple truncation, might cut mid-character in multibyte chars
+                 button_text = button_text[:max_len-3] + "..."
+                 # A more robust approach would iterate byte-wise
+
+            keyboard_rows.append([InlineKeyboardButton(button_text, callback_data='rl_noop')]) # Non-clickable bet display
+
+        # Summary row
+        keyboard_rows.append([InlineKeyboardButton(
+            f"💰 Общая сумма: {total_bet_amount} F ({total_bets_count}/{RL_MAX_BETS_PER_ROUND} ставок)",
+            callback_data='rl_noop'
+        )])
+        keyboard_rows.append([InlineKeyboardButton("───────", callback_data='rl_noop')]) # Separator
 
 
-    # Add action buttons based on state
+    # --- Add Action Buttons based on State ---
     if state == 'accepting_bets':
         # 'Add Bet' button if limits allow
         if total_bets_count < RL_MAX_BETS_PER_ROUND:
-            keyboard.append([InlineKeyboardButton("➕ Добавить ставку", callback_data='rl_start_bet')])
+            keyboard_rows.append([InlineKeyboardButton("➕ Добавить ставку", callback_data='rl_start_bet')])
         else:
             # Indicate round bet limit reached
-             keyboard.append([InlineKeyboardButton("🚫 Лимит ставок раунда достигнут", callback_data='rl_noop')])
+            keyboard_rows.append([InlineKeyboardButton("🚫 Лимит ставок раунда достигнут", callback_data='rl_noop')])
 
-        # 'Spin' button - Allow ONLY if bets exist AND only one player is betting (simplification)
-        # You could relax this condition if needed
-        if active_bets_by_user and len(active_bets_by_user) == 1:
-             keyboard.append([InlineKeyboardButton("🎰 Крутить!", callback_data='rl_spin')])
+        # 'Spin' button - Allow ONLY if bets exist AND (for simplicity) only one player is betting
+        # You could change this condition (e.g., allow initiator to spin, or anyone)
+        if active_bets_by_user: # Allow spin if any bets exist
+            # Condition to allow spin: only one better OR initiator can spin?
+            # Simplified: Allow if only one person bet
+            # if len(active_bets_by_user) == 1:
+            # Allow anyone to spin if bets exist:
+            keyboard_rows.append([InlineKeyboardButton("🎰 Крутить!", callback_data='rl_spin')])
 
     elif state == 'idle' or state == 'finished':
-         # Button now triggers a specific callback instead of noop
-         keyboard.append([InlineKeyboardButton("▶️ Начать новый раунд", callback_data='rl_new_round')]) # <<< MODIFIED
+        # Button to start a new round
+        keyboard_rows.append([InlineKeyboardButton("▶️ Начать новый раунд", callback_data='rl_new_round')])
 
     elif state == 'spinning':
         # Indicate wheel is spinning
-        keyboard.append([InlineKeyboardButton("⏳ Колесо вращается...", callback_data='rl_noop')])
+        keyboard_rows.append([InlineKeyboardButton("⏳ Колесо вращается...", callback_data='rl_noop')])
 
     # Always add help button
-    keyboard.append([InlineKeyboardButton("❓ Правила Рулетки", callback_data='rl_show_help')])
+    keyboard_rows.append([InlineKeyboardButton("❓ Правила Рулетки", callback_data='rl_show_help')])
 
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(keyboard_rows)
 
 def rl_get_bet_type_keyboard() -> InlineKeyboardMarkup:
     """Keyboard for selecting the type of bet."""
     keyboard = [
-        [InlineKeyboardButton("🔢 Число", callback_data='rl_type_number'), InlineKeyboardButton("🎨 Цвет", callback_data='rl_type_color')],
-        [InlineKeyboardButton("⚖️ Чет/Нечет", callback_data='rl_type_parity'), InlineKeyboardButton("📦 Дюжина", callback_data='rl_type_dozen')],
+        [InlineKeyboardButton("🔢 Число", callback_data='rl_type_number'),
+         InlineKeyboardButton("🎨 Цвет", callback_data='rl_type_color')],
+        [InlineKeyboardButton("⚖️ Чет/Нечет", callback_data='rl_type_parity'),
+         InlineKeyboardButton("📦 Дюжина", callback_data='rl_type_dozen')],
         [InlineKeyboardButton("📊 Колонка", callback_data='rl_type_column')],
         [InlineKeyboardButton("❌ Отмена", callback_data='rl_cancel_bet_step')] # Cancel betting process
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def rl_get_bet_value_keyboard(bet_type: str) -> InlineKeyboardMarkup:
-    """Keyboard for selecting the specific value of a bet (e.g., Red/Black, Dozen 1/2/3)."""
+    """Keyboard for selecting the specific value of a bet."""
     kb_rows = []
-    if bet_type == 'color':
-        kb_rows = [[
-            InlineKeyboardButton(RL_BET_VALUE_DISPLAY_NAMES['Red'], callback_data='rl_value_Red'),
-            InlineKeyboardButton(RL_BET_VALUE_DISPLAY_NAMES['Black'], callback_data='rl_value_Black')
-        ]]
-    elif bet_type == 'parity':
-        kb_rows = [[
-            InlineKeyboardButton(RL_BET_VALUE_DISPLAY_NAMES['Even'], callback_data='rl_value_Even'),
-            InlineKeyboardButton(RL_BET_VALUE_DISPLAY_NAMES['Odd'], callback_data='rl_value_Odd')
-        ]]
-    elif bet_type == 'dozen':
-        kb_rows = [
-            [InlineKeyboardButton(RL_BET_VALUE_DISPLAY_NAMES['1st'], callback_data='rl_value_1st')],
-            [InlineKeyboardButton(RL_BET_VALUE_DISPLAY_NAMES['2nd'], callback_data='rl_value_2nd')],
-            [InlineKeyboardButton(RL_BET_VALUE_DISPLAY_NAMES['3rd'], callback_data='rl_value_3rd')]
-        ]
-    elif bet_type == 'column':
-        kb_rows = [
-            [InlineKeyboardButton(RL_BET_VALUE_DISPLAY_NAMES['col1'], callback_data='rl_value_col1')],
-            [InlineKeyboardButton(RL_BET_VALUE_DISPLAY_NAMES['col2'], callback_data='rl_value_col2')],
-            [InlineKeyboardButton(RL_BET_VALUE_DISPLAY_NAMES['col3'], callback_data='rl_value_col3')]
-        ]
+    options = []
+    if bet_type == 'color': options = [('Red', '🔴 Красное'), ('Black', '⚫ Черное')]
+    elif bet_type == 'parity': options = [('Even', '⚖️ Четное'), ('Odd', '❓ Нечетное')]
+    elif bet_type == 'dozen': options = [('1st', '1️⃣ Дюж. 1-12'), ('2nd', '2️⃣ Дюж. 13-24'), ('3rd', '3️⃣ Дюж. 25-36')]
+    elif bet_type == 'column': options = [('col1', '📊 Кол. 1'), ('col2', '📊 Кол. 2'), ('col3', '📊 Кол. 3')]
+
+    # Build keyboard rows from options
+    row = []
+    max_per_row = 2 if bet_type in ['color', 'parity'] else 1 # Adjust layout
+    for value, display in options:
+        row.append(InlineKeyboardButton(display, callback_data=f'rl_value_{value}'))
+        if len(row) == max_per_row:
+            kb_rows.append(row)
+            row = []
+    if row: kb_rows.append(row) # Add remaining
+
     # Add navigation buttons
     kb_rows.append([InlineKeyboardButton("⬅️ Назад (к типу)", callback_data='rl_back_to_bet_type')])
     kb_rows.append([InlineKeyboardButton("❌ Отмена", callback_data='rl_cancel_bet_step')])
     return InlineKeyboardMarkup(kb_rows)
 
-def rl_get_bet_amount_keyboard(balance: float, bet_type: str) -> InlineKeyboardMarkup:
+
+def rl_get_bet_amount_keyboard(balance: float | None, bet_type: str) -> InlineKeyboardMarkup:
     """Keyboard for selecting the bet amount."""
-    keyboard = []
+    keyboard_rows = []
     row = []
-    # Filter amounts user can afford
-    valid_amounts = [a for a in RL_BET_AMOUNTS if balance is not None and a <= balance] # Added None check for balance
+    # Ensure balance is not None before comparison
+    valid_amounts = [a for a in RL_BET_AMOUNTS if balance is not None and a <= balance]
 
-    for amount in valid_amounts:
-        row.append(InlineKeyboardButton(str(amount), callback_data=f'rl_amount_{amount}'))
-        if len(row) == 3: # Max 3 amount buttons per row
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
+    if not valid_amounts and balance is not None and balance > 0:
+         # Indicate if balance is too low for any standard bet amount
+         keyboard_rows.append([InlineKeyboardButton(f"Баланс ({balance:.2f} F) < мин. ставки ({min(RL_BET_AMOUNTS)} F)", callback_data='rl_noop')])
+    else:
+        for amount in valid_amounts:
+            row.append(InlineKeyboardButton(str(amount), callback_data=f'rl_amount_{amount}'))
+            if len(row) == 3: # 3 amounts per row
+                keyboard_rows.append(row)
+                row = []
+        if row:
+            keyboard_rows.append(row)
 
-    # Determine correct "Back" button destination
-    if bet_type == 'number': # Came from text input, go back to type selection
-         back_cb = 'rl_back_to_bet_type'
-         back_txt = "⬅️ Назад (к типу)"
-    else: # Came from value selection
-        back_cb = 'rl_back_to_bet_value'
-        back_txt = "⬅️ Назад (к значению)"
-
-    keyboard.append([InlineKeyboardButton(back_txt, callback_data=back_cb)])
-    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data='rl_cancel_bet_step')])
-    return InlineKeyboardMarkup(keyboard)
+    # Determine correct "Back" button target
+    back_cb = 'rl_back_to_bet_type' if bet_type == 'number' else 'rl_back_to_bet_value'
+    back_txt = "⬅️ Назад (к типу)" if bet_type == 'number' else "⬅️ Назад (к значению)"
+    keyboard_rows.append([InlineKeyboardButton(back_txt, callback_data=back_cb)])
+    keyboard_rows.append([InlineKeyboardButton("❌ Отмена", callback_data='rl_cancel_bet_step')])
+    return InlineKeyboardMarkup(keyboard_rows)
 
 def rl_get_confirmation_keyboard() -> InlineKeyboardMarkup:
     """Keyboard for confirming the bet placement."""
     keyboard = [
-        [
-            InlineKeyboardButton("✅ Да, поставить!", callback_data='rl_confirm_bet_yes'),
-            InlineKeyboardButton("✏️ Нет, изменить", callback_data='rl_back_to_bet_type') # Go back to start of bet process
-        ],
+        [InlineKeyboardButton("✅ Да, поставить!", callback_data='rl_confirm_bet_yes'),
+         InlineKeyboardButton("✏️ Нет, изменить", callback_data='rl_back_to_bet_type')], # Go back to type selection
         [InlineKeyboardButton("❌ Отмена", callback_data='rl_cancel_bet_step')]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 # --- Roulette Async/Job Functions ---
 
+async def rl_remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Removes job queue jobs by name if they exist. Returns True if removed."""
+    # Use context.job_queue directly
+    jobs = context.job_queue.get_jobs_by_name(name)
+    if not jobs:
+        return False
+    removed_count = 0
+    for job in jobs:
+        job.schedule_removal()
+        removed_count += 1
+    if removed_count > 0:
+        logger.info(f"Removed {removed_count} Job Queue job(s): {name}")
+        return True
+    return False
+
+
 async def rl_spin_roulette_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Job queue callback function that triggers the roulette spin after the timer."""
-    job_context = context.job.data
-    chat_id = job_context.get('chat_id')
-
+    job_data = context.job.data if context.job else {}
+    chat_id = job_data.get('chat_id')
     if not chat_id:
-        logger.error(f"Roulette timer job missing chat_id: {job_context}")
+        logger.error(f"Roulette timer job missing chat_id: {job_data}")
         return
 
     logger.info(f"Roulette betting timer expired for chat_id={chat_id}")
-
-    # Use application.chat_data for shared chat state
+    # Use application.chat_data for persistent chat-specific data
     chat_data = context.application.chat_data.get(chat_id, {})
     game_state = chat_data.get(RL_GAME_KEY)
 
-    # Verify game state before proceeding
+    # --- State Check ---
     if not game_state or game_state.get('state') != 'accepting_bets':
         logger.warning(f"Roulette timer job fired for chat {chat_id}, but game not in 'accepting_bets' state ({game_state.get('state') if game_state else 'No Game'}). Aborting.")
-        # Ensure display timer is also potentially cleaned up if state is wrong
+        # Clean up potentially orphaned display timer job if main timer fired unexpectedly
         display_timer_name = game_state.get('timer_display_job_name') if game_state else None
         if display_timer_name:
-             await rl_remove_job_if_exists(display_timer_name, context)
-             if game_state: game_state.pop('timer_display_job_name', None) # Check game_state again
-        if game_state: game_state.pop('timer_job_name', None) # Clean up main timer name if state exists
+            await rl_remove_job_if_exists(display_timer_name, context)
+            if game_state: game_state.pop('timer_display_job_name', None)
+        # Also remove self-reference if present
+        if game_state: game_state.pop('timer_job_name', None)
         return
 
+    # --- Check for Bets ---
     active_bets_by_user = game_state.get('active_bets', {})
-
-    # If timer expires and no bets were placed, end the round
     if not active_bets_by_user:
         logger.warning(f"Roulette timer job fired for chat {chat_id}, but no bets placed. Ending round.")
-        game_state['state'] = 'finished' # Reset state to finished/idle
-        # Remove both timer names and jobs
-        spin_timer_name = game_state.pop('timer_job_name', None) # Remove main timer name
-        display_timer_name = game_state.pop('timer_display_job_name', None) # Remove display timer name
-        if spin_timer_name: await rl_remove_job_if_exists(spin_timer_name, context)
+        game_state['state'] = 'finished' # Mark as finished
+        # Clean up timers
+        spin_timer_name = game_state.pop('timer_job_name', None) # Should be self
+        display_timer_name = game_state.pop('timer_display_job_name', None)
+        # await rl_remove_job_if_exists(spin_timer_name, context) # No need, job is finishing
         if display_timer_name: await rl_remove_job_if_exists(display_timer_name, context)
 
         message_id = game_state.get('message_id')
         if message_id:
             try:
-                # Generate final keyboard before editing message
-                final_reply_markup = rl_get_main_menu_keyboard(chat_data, {})
+                # Get display names (empty in this case, but keep structure)
+                display_names = await rl_get_display_name_map(context, [])
+                final_reply_markup = rl_get_main_menu_keyboard(chat_data, display_names)
                 await context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
+                    chat_id=chat_id, message_id=message_id,
                     text="⏳ Время для ставок истекло. Ставок не было.\nНачните новый раунд.",
-                    reply_markup=final_reply_markup # Show start button
+                    reply_markup=final_reply_markup
                 )
+            except Forbidden: logger.error(f"Forbidden: Cannot edit message in chat {chat_id}")
             except Exception as e:
-                 logger.warning(f"Could not edit message in chat {chat_id} after timer expired with no bets: {e}")
-        return # Stop execution
+                logger.warning(f"Could not edit message in chat {chat_id} after timer expired with no bets: {e}")
+        return
 
-    # Bets exist, proceed to spin
+    # --- Bets exist, proceed to spin ---
     logger.info(f"Roulette timer starting spin for chat {chat_id}")
-    # Timer removal is now handled inside rl_spin_roulette_logic
+    # Call the main spin logic function
     await rl_spin_roulette_logic(context, chat_id)
 
 
 async def rl_update_timer_display_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Repeating job to update the timer display in the roulette message."""
-    job_data = context.job.data
+    job_data = context.job.data if context.job else {}
     chat_id = job_data.get('chat_id')
     main_timer_job_name = job_data.get('main_timer_job_name')
     this_job_name = context.job.name if context.job else None
 
     if not chat_id or not main_timer_job_name:
         logger.error(f"Roulette display timer job missing data: {job_data} (Job: {this_job_name})")
-        if context.job: context.job.schedule_removal() # Remove self if broken
+        if context.job: context.job.schedule_removal() # Stop invalid job
         return
 
-    # Use application.chat_data
     chat_data = context.application.chat_data.get(chat_id, {})
     game_state = chat_data.get(RL_GAME_KEY)
 
-    # --- Check conditions to continue running ---
-    # 1. Game must exist and be in 'accepting_bets' state
+    # --- Check if Game State is Still Valid for Timer ---
     if not game_state or game_state.get('state') != 'accepting_bets':
         logger.debug(f"Stopping display timer job '{this_job_name}' for chat {chat_id}: Game state is not 'accepting_bets' ({game_state.get('state') if game_state else 'No Game'}).")
-        if context.job: context.job.schedule_removal() # Remove self
-        # Ensure the name is cleared from game_state if it matches this job
+        if context.job: context.job.schedule_removal() # Stop this repeating job
+        # Clean up reference in game state if it matches this job
         if game_state and game_state.get('timer_display_job_name') == this_job_name:
-             game_state.pop('timer_display_job_name', None)
+            game_state.pop('timer_display_job_name', None)
         return
 
-    # 2. The main timer job must still exist
+    # --- Check if Main Timer Still Exists ---
     main_timer_jobs = context.job_queue.get_jobs_by_name(main_timer_job_name)
     if not main_timer_jobs:
         logger.debug(f"Stopping display timer job '{this_job_name}' for chat {chat_id}: Main timer job '{main_timer_job_name}' not found.")
-        if context.job: context.job.schedule_removal() # Remove self
-        # Also ensure the display timer name is cleared from game_state if it matches this job
+        if context.job: context.job.schedule_removal() # Stop this repeating job
         if game_state and game_state.get('timer_display_job_name') == this_job_name:
             game_state.pop('timer_display_job_name', None)
-        # Attempt one final update without the timer text before stopping
+        # Update the message one last time without the timer text
         await rl_show_game_state(context, chat_id, edit_existing=True)
         return
 
-    # --- Update the message ---
-    # We simply call rl_show_game_state, which now knows how to fetch
-    # the remaining time from the main_timer_job_name stored in game_state.
+    # --- Main Timer Exists, Update Display ---
     update_result = await rl_show_game_state(context, chat_id, edit_existing=True)
-
-    # If updating the message fails (e.g., deleted message, permissions), stop this job
-    if update_result is None:
+    if update_result is None: # Check if the message update failed
         logger.warning(f"Stopping display timer job '{this_job_name}' for chat {chat_id}: Failed to update game state message.")
-        if context.job: context.job.schedule_removal() # Remove self
-         # Also ensure the display timer name is cleared from game_state
+        if context.job: context.job.schedule_removal() # Stop job if message can't be updated
         if game_state and game_state.get('timer_display_job_name') == this_job_name:
             game_state.pop('timer_display_job_name', None)
 
 
-async def rl_remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Removes job queue jobs by name if they exist."""
-    current_jobs = context.job_queue.get_jobs_by_name(name)
-    if not current_jobs:
-        return False
-    removed = False
-    for job in current_jobs:
-        job.schedule_removal()
-        removed = True
-    if removed:
-        logger.info(f"Removed Job Queue job: {name}")
-    return removed
-
 # --- Roulette Command and Callback Handlers ---
-
 async def roulette_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /roulette command to start or show the game."""
+    if not update.message or not update.effective_chat or not update.effective_user: return
     chat = update.effective_chat
     user = update.effective_user
     chat_id = chat.id
     logger.info(f"/roulette command from user {user.id} in chat {chat_id} (type: {chat.type})")
 
-    get_or_create_user(user.id) # Ensure user profile exists
+    # Ensure user profile exists
+    get_or_create_user(user.id)
 
-    # Use application.chat_data for shared game state in this chat
-    chat_data = context.chat_data
+    chat_data = context.application.chat_data.setdefault(chat_id, {}) # Ensure chat_data exists
     game_state = chat_data.get(RL_GAME_KEY)
+    current_message_id = game_state.get('message_id') if game_state else None
 
-    # Handle existing game states
-    if game_state and game_state.get('state') == 'spinning':
-         logger.info(f"Roulette game currently spinning in chat {chat_id}. Ignoring /roulette command.")
-         try:
-             # Reply directly to the command message
-             await update.message.reply_text("⏳ Колесо рулетки уже вращается, подождите окончания раунда.", quote=True)
-         except Exception: pass
-         return
-    elif game_state and game_state.get('state') == 'accepting_bets':
-        logger.info(f"Roulette game already active in chat {chat_id} (state: accepting_bets). Resending status message.")
-        try:
-            await update.message.delete() # Delete the command message
-        except Exception as e:
-             logger.warning(f"Could not delete /roulette command message in chat {chat_id}: {e}")
-        # Show the current game state again (send as new message)
-        # If the state is accepting bets, the message might have been lost, so resend
-        await rl_show_game_state(context, chat_id, edit_existing=False) # Force send new
-        return
+    # --- Handle Existing Game States ---
+    if game_state:
+        state = game_state.get('state')
+        if state == 'spinning':
+            logger.info(f"Roulette game currently spinning in chat {chat_id}. Ignoring /roulette command.")
+            try:
+                # Quote the command message if possible
+                await update.message.reply_text("⏳ Колесо рулетки уже вращается, подождите окончания раунда.", quote=True)
+            except Exception: pass
+            return
+        elif state == 'accepting_bets':
+            logger.info(f"Roulette game already active in chat {chat_id} (state: accepting_bets). Resending status message.")
+            # Delete the triggering command message
+            try: await update.message.delete()
+            except Exception as e: logger.warning(f"Could not delete /roulette command message in chat {chat_id}: {e}")
+            # Resend the game state message if the old one is gone or needs update
+            await rl_show_game_state(context, chat_id, edit_existing=True) # Try editing first
+            return
 
     # --- Start a New Round ---
     logger.info(f"Starting new roulette round in chat {chat_id}")
 
-    # Cancel any existing spin timer AND display timer for this chat
+    # Clean up any old timers associated with this chat
     old_spin_timer_job_name = game_state.get('timer_job_name') if game_state else None
     old_display_timer_job_name = game_state.get('timer_display_job_name') if game_state else None
-
     if old_spin_timer_job_name:
         await rl_remove_job_if_exists(old_spin_timer_job_name, context)
         logger.info(f"Removed old spin timer '{old_spin_timer_job_name}' for chat {chat_id}")
@@ -1967,246 +2263,235 @@ async def roulette_start_command(update: Update, context: ContextTypes.DEFAULT_T
         await rl_remove_job_if_exists(old_display_timer_job_name, context)
         logger.info(f"Removed old display timer '{old_display_timer_job_name}' for chat {chat_id}")
 
-    # Delete previous game message if it exists
-    if game_state and game_state.get('message_id'):
+    # Clean up old message if it exists
+    if current_message_id:
         try:
-            await context.bot.delete_message(chat_id, game_state['message_id'])
-            logger.debug(f"Deleted previous roulette message {game_state['message_id']} in chat {chat_id}")
+            await context.bot.delete_message(chat_id, current_message_id)
+            logger.debug(f"Deleted previous roulette message {current_message_id} in chat {chat_id}")
         except Exception as e:
-            logger.debug(f"Failed to delete previous roulette message {game_state.get('message_id')} in chat {chat_id}: {e}")
+            logger.debug(f"Failed to delete previous roulette message {current_message_id} in chat {chat_id}: {e}")
 
     # Initialize new game state in chat_data
     new_game_state = {
         'state': 'accepting_bets',
-        'active_bets': {},
-        'message_id': None,
-        'timer_job_name': None, # For the main spin trigger
-        'timer_display_job_name': None, # For the repeating display update
-        'initiator_id': user.id
+        'active_bets': {}, # Bets stored as {user_id: [bet_dict1, bet_dict2]}
+        'message_id': None, # Will be set by show_game_state
+        'timer_job_name': None,
+        'timer_display_job_name': None,
+        'initiator_id': user.id # Track who started the round
     }
     chat_data[RL_GAME_KEY] = new_game_state
 
-    # Delete the triggering /roulette command message
-    try:
-        await update.message.delete()
-    except Exception as e:
-         logger.warning(f"Could not delete /roulette command message in chat {chat_id}: {e}")
+    # Delete the triggering command message
+    try: await update.message.delete()
+    except Exception as e: logger.warning(f"Could not delete /roulette command message in chat {chat_id}: {e}")
 
-    # Show the initial "Accepting Bets" state (send as new message)
+    # Send the initial game state message
     await rl_show_game_state(
-        context,
-        chat_id,
+        context, chat_id,
         message_text="🎲 <b>Американская Рулетка!</b>\nДелайте ваши ставки!",
-        edit_existing=False # Send as a new message
+        edit_existing=False # Force sending a new message
     )
-
 
 async def rl_new_round_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the 'Start New Round' button press from the main keyboard."""
     query = update.callback_query
+    if not query or not query.message or not query.from_user: return
     user = query.from_user
     chat = query.message.chat
     chat_id = chat.id
-    logger.info(f"'rl_new_round' callback from user {user.id} in chat {chat_id}")
-
-    await query.answer("Запуск нового раунда...")
-
-    get_or_create_user(user.id) # Ensure user profile exists
-
-    # Use application.chat_data for shared game state in this chat
-    chat_data = context.chat_data
-    game_state = chat_data.get(RL_GAME_KEY)
     current_message_id = query.message.message_id
 
-    # --- Clean up previous round state ---
-    # Cancel any existing timers (spin timer AND display timer)
+    logger.info(f"'rl_new_round' callback from user {user.id} in chat {chat_id}")
+    await query.answer("Запуск нового раунда...") # Answer callback quickly
+
+    # Ensure user profile exists
+    get_or_create_user(user.id)
+
+    chat_data = context.application.chat_data.get(chat_id, {})
+    game_state = chat_data.get(RL_GAME_KEY)
+
+    # Clean up timers from the previous round
     old_spin_timer_job_name = game_state.get('timer_job_name') if game_state else None
     old_display_timer_job_name = game_state.get('timer_display_job_name') if game_state else None
+    if old_spin_timer_job_name: await rl_remove_job_if_exists(old_spin_timer_job_name, context)
+    if old_display_timer_job_name: await rl_remove_job_if_exists(old_display_timer_job_name, context)
 
-    if old_spin_timer_job_name:
-        await rl_remove_job_if_exists(old_spin_timer_job_name, context)
-    if old_display_timer_job_name:
-        await rl_remove_job_if_exists(old_display_timer_job_name, context)
-
-    # Delete the message containing the "Start New Round" button
+    # Delete the message that had the "Start New Round" button
     try:
         await context.bot.delete_message(chat_id, current_message_id)
         logger.debug(f"Deleted previous roulette message {current_message_id} via rl_new_round_callback in chat {chat_id}")
     except Exception as e:
         logger.debug(f"Failed to delete message {current_message_id} in rl_new_round_callback for chat {chat_id}: {e}")
 
-    # Initialize new game state in chat_data
+    # Initialize new game state
     new_game_state = {
         'state': 'accepting_bets',
-        'active_bets': {}, # user_id -> list of bet dicts
-        'message_id': None, # Will be set by rl_show_game_state
-        'timer_job_name': None, # Will be set when first bet is placed
-        'timer_display_job_name': None, # Will be set along with timer_job_name
-        'initiator_id': user.id # Store who started the round (optional)
+        'active_bets': {},
+        'message_id': None,
+        'timer_job_name': None,
+        'timer_display_job_name': None,
+        'initiator_id': user.id
     }
-    chat_data[RL_GAME_KEY] = new_game_state
+    chat_data[RL_GAME_KEY] = new_game_state # Update chat_data
 
-    # Show the initial "Accepting Bets" state (send as new message)
+    # Send the initial betting message
     await rl_show_game_state(
-        context,
-        chat_id,
+        context, chat_id,
         message_text="🎲 <b>Американская Рулетка!</b>\nДелайте ваши ставки!",
-        edit_existing=False # Send as a new message
+        edit_existing=False # Send new message
     )
 
-
-async def rl_show_game_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_text: str | None = None, edit_existing: bool = True):
-    """Updates or sends the main roulette game message with keyboard."""
-    # Use application.chat_data for shared state
+async def rl_show_game_state(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_text: str | None = None,
+    edit_existing: bool = True
+    ) -> Message | int | None:
+    """Updates or sends the main roulette game message with keyboard. Returns message_id/object or None."""
     chat_data = context.application.chat_data.get(chat_id, {})
     game_state = chat_data.get(RL_GAME_KEY)
 
     if not game_state:
         logger.debug(f"rl_show_game_state called for chat {chat_id} but no game state found.")
-        return None # Indicate failure
+        return None
 
     message_id = game_state.get('message_id')
     state = game_state.get('state', 'unknown')
-    main_timer_job_name = game_state.get('timer_job_name') # Get the name of the ONE-SHOT timer
+    main_timer_job_name = game_state.get('timer_job_name')
     active_bets_by_user = game_state.get('active_bets', {})
 
-    # --- Get Display Names for Bettors ---
-    display_name_map = {}
-    user_ids = list(active_bets_by_user.keys())
-    if user_ids:
-        try:
-            mention_data = await asyncio.gather(*(get_user_mention(context, uid) for uid in user_ids))
-            display_name_map = {uid: mention_data[i][1] for i, uid in enumerate(user_ids)} # Use display name
-        except Exception as e:
-            logger.error(f"Failed to fetch user display names for roulette state in chat {chat_id}: {e}")
-            display_name_map = {uid: f"User_{uid}" for uid in user_ids} # Fallback
+    # Determine if editing is possible
+    attempt_edit = edit_existing and message_id is not None
 
+    # --- Fetch Display Names for Keyboard ---
+    user_ids_with_bets = list(active_bets_by_user.keys())
+    display_name_map = await rl_get_display_name_map(context, user_ids_with_bets)
 
-    # --- Determine Message Text ---
+    # --- Determine Base Text ---
     if message_text is None:
-        # Default text based on game state
         if state == 'accepting_bets':
             base_text = "🎲 <b>Американская Рулетка!</b>\nДелайте ваши ставки!"
         elif state == 'spinning':
             base_text = "🎰 <b>Колесо вращается...</b>"
-        elif state == 'finished': # Changed from idle/finished
-             base_text = "🏁 Раунд Рулетки завершен.\nНажмите 'Начать новый раунд' ниже."
-        else: # Including 'idle' which shouldn't normally happen during active display
-            base_text = f"🎲 <b>Американская Рулетка</b> [Состояние: {state}]" # Fallback
+        elif state == 'finished':
+            base_text = "🏁 Раунд Рулетки завершен." # Outcome shown in spin logic message
+        else: # idle or unknown
+            base_text = f"🎲 <b>Американская Рулетка</b> [Состояние: {state}]"
     else:
-        # Use provided text (e.g., for cancellation message)
-        base_text = message_text
+        base_text = message_text # Use provided text
 
-    # Add timer info if active
+    # --- Add Timer Text if Applicable ---
     timer_text = ""
-    # Check if the main timer name exists in game_state
-    if main_timer_job_name and state == 'accepting_bets': # Only show timer if accepting bets
-         jobs = context.job_queue.get_jobs_by_name(main_timer_job_name)
-         if jobs and jobs[0].next_t: # Check if job exists and has a next run time
-             remaining = max(0, int(jobs[0].next_t.timestamp() - time.time()))
-             timer_text = f"\n⏳ <i>Авто-старт через ~{remaining} сек...</i>"
-         else:
-             # Main timer job doesn't exist or finished, but name might linger in state
-             logger.debug(f"Timer job name '{main_timer_job_name}' in state, but job not found/active in chat {chat_id}.")
+    if main_timer_job_name and state == 'accepting_bets':
+        jobs = context.job_queue.get_jobs_by_name(main_timer_job_name)
+        if jobs and jobs[0].next_t: # Check if job exists and has next run time
+            try:
+                remaining = max(0, int(jobs[0].next_t.timestamp() - time.time()))
+                timer_text = f"\n⏳ <i>Авто-старт через ~{remaining} сек...</i>"
+            except Exception as e:
+                logger.warning(f"Error calculating remaining time for job {main_timer_job_name}: {e}")
+        else:
+            logger.debug(f"Timer job '{main_timer_job_name}' in state, but job not found/active in chat {chat_id}.")
+            # Timer job might have just finished or been removed, remove from state if still present
+            if game_state.get('timer_job_name') == main_timer_job_name:
+                game_state.pop('timer_job_name', None)
+            if game_state.get('timer_display_job_name'): # Also stop display timer if main is gone
+                 await rl_remove_job_if_exists(game_state['timer_display_job_name'], context)
+                 game_state.pop('timer_display_job_name', None)
 
+
+    # --- Combine Text and Get Keyboard ---
     full_text = base_text + timer_text
-
-    # --- Generate Keyboard ---
-    reply_markup = rl_get_main_menu_keyboard(chat_data, display_name_map) # Pass potentially updated chat_data
+    reply_markup = rl_get_main_menu_keyboard(chat_data, display_name_map)
 
     # --- Send or Edit Message ---
-    sent_message = None # To store new Message object if sent
-    new_message_sent = False
+    sent_message_obj: Message | None = None
+    result: Message | int | None = None
     edit_failed_and_sending_new = False
+
     try:
-        if edit_existing and message_id:
-            # Attempt to edit the existing message
+        if attempt_edit:
             await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=full_text,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.HTML
+                chat_id=chat_id, message_id=message_id, text=full_text,
+                reply_markup=reply_markup, parse_mode=ParseMode.HTML
             )
             logger.debug(f"Edited roulette state message {message_id} in chat {chat_id}")
+            result = message_id # Return ID on successful edit
         else:
-            # Send a new message
-            # Delete old one first if we intended to edit but couldn't find it
-            if message_id and edit_existing:
-                 try:
-                     await context.bot.delete_message(chat_id, message_id)
-                     logger.debug(f"Deleted old message {message_id} before sending new in chat {chat_id}")
-                 except Exception: pass
-                 edit_failed_and_sending_new = True # Flag that edit failed
+            # Try deleting old message before sending new if edit wasn't attempted/possible but ID existed
+            if message_id and not attempt_edit:
+                try:
+                    await context.bot.delete_message(chat_id, message_id)
+                    logger.debug(f"Deleted old message {message_id} before sending new in chat {chat_id}")
+                except Exception: pass # Ignore delete error
 
-            sent_message = await context.bot.send_message(
-                chat_id=chat_id,
-                text=full_text,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.HTML
+            sent_message_obj = await context.bot.send_message(
+                chat_id=chat_id, text=full_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML
             )
-            # IMPORTANT: Update message_id in game state ONLY if game still exists
+            # Update game state with the new message ID *immediately*
             current_game_state = context.application.chat_data.get(chat_id, {}).get(RL_GAME_KEY)
             if current_game_state:
-                 current_game_state['message_id'] = sent_message.message_id
-                 logger.info(f"Sent new roulette state message {sent_message.message_id} in chat {chat_id}. Updated game state.")
+                current_game_state['message_id'] = sent_message_obj.message_id
+                logger.info(f"Sent new roulette state message {sent_message_obj.message_id} in chat {chat_id}. Updated game state.")
             else:
-                 logger.warning(f"Sent new roulette message {sent_message.message_id} for chat {chat_id}, but game state was missing upon update.")
-
-            new_message_sent = True
+                logger.warning(f"Sent new roulette message {sent_message_obj.message_id} for chat {chat_id}, but game state was missing upon update.")
+            result = sent_message_obj # Return new message object
 
     except BadRequest as e:
         error_str = str(e).lower()
         if "message is not modified" in error_str:
             logger.debug(f"Roulette state message {message_id} not modified.")
+            result = message_id # Treat as success
         elif "message to edit not found" in error_str or "chat not found" in error_str or "message can't be edited" in error_str:
-             logger.warning(f"Failed to edit roulette message {message_id} in chat {chat_id} (not found/editable). Forcing send new.")
-             if game_state: game_state['message_id'] = None # Clear invalid ID from potentially stale state
-             # Recursive call ONLY if we weren't already trying to send new after an edit failure
-             if not edit_failed_and_sending_new:
-                  return await rl_show_game_state(context, chat_id, message_text=full_text, edit_existing=False)
-             else:
-                  logger.error(f"Recursive send new failed in chat {chat_id} after edit failure.")
-                  return None # Avoid infinite recursion
+            logger.warning(f"Failed to edit roulette message {message_id} in chat {chat_id} (not found/editable). Forcing send new.")
+            if game_state: game_state['message_id'] = None # Clear invalid ID
+            # Retry by calling self to send a new message
+            if not edit_failed_and_sending_new: # Prevent infinite loop
+                return await rl_show_game_state(context, chat_id, message_text=full_text, edit_existing=False)
+            else:
+                logger.error(f"Recursive send new failed in chat {chat_id} after edit failure.")
+                return None
         elif "message text is empty" in error_str:
-             logger.error(f"Attempted to send empty message to chat {chat_id}. Text: '{full_text}'")
-             return None # Indicate failure
+            logger.error(f"Attempted to send empty message to chat {chat_id}. Text: '{full_text}'")
+            return None # Cannot send empty message
         else:
+            # Other BadRequest, log and return None
             logger.error(f"BadRequest showing roulette state for chat {chat_id} (msg {message_id}): {e}")
-            return None # Indicate failure
-    except Forbidden as e:
-        logger.error(f"Forbidden error in chat {chat_id} (likely bot kicked/blocked): {e}")
-        # Clean up game state and timers for this chat
-        current_chat_data = context.application.chat_data.get(chat_id, {}) # Re-fetch
-        current_game_state = current_chat_data.get(RL_GAME_KEY)
-        current_chat_data.pop(RL_GAME_KEY, None)
-        timer_job = current_game_state.get('timer_job_name') if current_game_state else None
-        display_timer_job = current_game_state.get('timer_display_job_name') if current_game_state else None
-        if timer_job: await rl_remove_job_if_exists(timer_job, context)
-        if display_timer_job: await rl_remove_job_if_exists(display_timer_job, context)
-        return None
+            return None
+    except Forbidden:
+        logger.error(f"Forbidden error in chat {chat_id} (likely bot kicked/blocked). Cleaning up game state.")
+        # Clean up game state and timers for this chat if forbidden
+        current_chat_data = context.application.chat_data.get(chat_id, {})
+        current_game_state = current_chat_data.pop(RL_GAME_KEY, None) # Remove game state
+        if current_game_state:
+            timer_job = current_game_state.get('timer_job_name')
+            display_timer_job = current_game_state.get('timer_display_job_name')
+            if timer_job: await rl_remove_job_if_exists(timer_job, context)
+            if display_timer_job: await rl_remove_job_if_exists(display_timer_job, context)
+        return None # Indicate failure
     except Exception as e:
         logger.error(f"Unexpected error showing roulette state for chat {chat_id} (msg {message_id}): {e}", exc_info=True)
-        return None
+        return None # Indicate failure
 
-    # Return the Message object if new, or the ID if edited successfully
-    return sent_message if new_message_sent else message_id
+    return result
 
 
 async def rl_start_bet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the 'Add Bet' button press."""
     query = update.callback_query
+    if not query or not query.message or not query.from_user: return
     user = query.from_user
     chat_id = query.message.chat_id
     logger.debug(f"rl_start_bet_callback from user {user.id} in chat {chat_id}")
 
-    get_or_create_user(user.id) # Ensure user exists
+    # Ensure user profile exists
+    get_or_create_user(user.id)
 
-    # Use application.chat_data and user_data
-    chat_data = context.chat_data
+    chat_data = context.application.chat_data.get(chat_id, {})
     game_state = chat_data.get(RL_GAME_KEY)
 
-    # --- Check Game State and Limits ---
+    # --- Validations ---
     if not game_state or game_state.get('state') != 'accepting_bets':
         await query.answer("Сейчас нельзя делать ставки.", show_alert=True)
         return
@@ -2222,238 +2507,278 @@ async def rl_start_bet_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer(f"Вы достигли лимита ставок на раунд ({RL_MAX_BETS_PER_USER})!", show_alert=True)
         return
 
-    # --- Start Bet Process ---
-    # Store temporary bet info in user_data (specific to this user)
+    # --- Start Bet Creation Process ---
+    # Use user_data for temporary bet construction state
     context.user_data[RL_USER_TEMP_BET_KEY] = {'step': 'type'}
     await query.answer() # Acknowledge button press
 
-    # Edit the message to show the bet type selection
     try:
+        # Edit the main game message to show bet type selection
         await query.edit_message_text(
             text="➕ <b>Новая ставка</b>\nВыберите тип ставки:",
             reply_markup=rl_get_bet_type_keyboard(),
             parse_mode=ParseMode.HTML
         )
+        # Store the message_id being edited for later steps
+        context.user_data[RL_USER_TEMP_BET_KEY]['prompt_message_id'] = query.message.message_id
+
     except BadRequest as e:
         if "message is not modified" not in str(e).lower():
-             logger.error(f"Error editing message for bet type selection: {e}")
-             # Inform user if edit fails (and wasn't just 'not modified')
-             await query.message.reply_text("Ошибка отображения меню ставок.")
+            logger.error(f"Error editing message for bet type selection: {e}")
+            # Attempt to send a reply if edit failed fundamentally
+            try: await query.message.reply_text("Ошибка отображения меню ставок.")
+            except Exception: pass
         else:
-             logger.debug("Message not modified on starting bet type selection.") # Common case
+            logger.debug("Message not modified on starting bet type selection.")
     except Exception as e:
         logger.error(f"Error editing message for bet type selection: {e}")
-        # Fallback: send new message if edit fails unexpectedly
-        await context.bot.send_message(chat_id, "Ошибка отображения меню ставок.")
+        # Attempt to send a reply if edit failed
+        try: await context.bot.send_message(chat_id, "Ошибка отображения меню ставок.")
+        except Exception: pass
 
 
 async def rl_choose_bet_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles selection of bet type (Number, Color, etc.)."""
     query = update.callback_query
+    if not query or not query.message or not query.from_user: return
     user = query.from_user
+    chat_id = query.message.chat_id # Get chat_id
+
     temp_bet = context.user_data.get(RL_USER_TEMP_BET_KEY)
 
-    # Check if user is in the correct step
+    # --- Validation ---
     if not temp_bet or temp_bet.get('step') != 'type':
         await query.answer("Неверный шаг или ставка отменена.", show_alert=True)
-        # Restore main game view if the message was hijacked for betting
-        await rl_show_game_state(context, query.message.chat_id, edit_existing=True)
+        # Restore main game state view if bet process is broken
+        await rl_show_game_state(context, chat_id, edit_existing=True)
         return
 
-    await query.answer() # Acknowledge selection
+    await query.answer() # Acknowledge button press
     bet_type_choice = query.data.replace('rl_type_', '')
     temp_bet['type'] = bet_type_choice
-    temp_bet['step'] = 'value' # Default next step
+    prompt_message_id = temp_bet.get('prompt_message_id')
 
     try:
         if bet_type_choice == 'number':
-            # Special handling for 'number' - requires text input
+            # --- Ask for Number Input ---
             temp_bet['step'] = 'ask_number'
-            context.user_data[RL_USER_TEMP_BET_KEY] = temp_bet # Save state change
-            # Edit message to prompt for number input
-            await query.edit_message_text(
+            # Ensure prompt_message_id is stored
+            if not prompt_message_id: prompt_message_id = query.message.message_id
+            temp_bet['prompt_message_id'] = prompt_message_id
+            context.user_data[RL_USER_TEMP_BET_KEY] = temp_bet # Save state
+
+            # Edit the message to prompt for text input
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=prompt_message_id,
                 text="➕ <b>Новая ставка</b>\nТип: 🔢 Число\n\n<b>Введите число (0, 00, или 1-36) в чат:</b>",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data='rl_cancel_bet_step')]]), # Only Cancel button
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data='rl_cancel_bet_step')]]),
                 parse_mode=ParseMode.HTML
             )
         else:
-            # For other types, show the value selection keyboard
-            type_display = RL_BET_VALUE_DISPLAY_NAMES.get(bet_type_choice.capitalize()) # Get display name (e.g., "🔴 Красное")
-            if not type_display: type_display = bet_type_choice.capitalize() # Fallback
+            # --- Show Value Selection Keyboard ---
+            temp_bet['step'] = 'value'
+            # Ensure prompt_message_id is stored
+            if not prompt_message_id: prompt_message_id = query.message.message_id
+            temp_bet['prompt_message_id'] = prompt_message_id
+            context.user_data[RL_USER_TEMP_BET_KEY] = temp_bet # Save state
 
-            await query.edit_message_text(
-                text=f"➕ <b>Новая ставка</b>\nТип: {type_display}\n\nВыберите значение:",
-                reply_markup=rl_get_bet_value_keyboard(bet_type_choice),
-                parse_mode=ParseMode.HTML
-            )
+            # Get display name for the chosen type
+            type_display = RL_BET_VALUE_DISPLAY_NAMES.get(bet_type_choice.capitalize(), bet_type_choice.capitalize()) # Fallback
+            await context.bot.edit_message_text(
+                 chat_id=chat_id, message_id=prompt_message_id,
+                 text=f"➕ <b>Новая ставка</b>\nТип: {type_display}\n\nВыберите значение:",
+                 reply_markup=rl_get_bet_value_keyboard(bet_type_choice),
+                 parse_mode=ParseMode.HTML
+             )
+
     except BadRequest as e:
         if "message is not modified" not in str(e).lower():
-             logger.error(f"Error editing message for bet value/number selection: {e}")
+            logger.error(f"Error editing message for bet value/number selection (chat {chat_id}): {e}")
+    except Forbidden:
+         logger.error(f"Forbidden: Cannot edit message for bet value/number selection in chat {chat_id}")
     except Exception as e:
-        logger.error(f"Error editing message for bet value/number selection: {e}")
+        logger.error(f"Error editing message for bet value/number selection (chat {chat_id}): {e}")
 
 
 async def rl_handle_number_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles text messages when expecting a roulette number bet."""
+    if not update.message or not update.effective_user or not update.effective_chat: return
     user = update.effective_user
     chat_id = update.effective_chat.id
     temp_bet = context.user_data.get(RL_USER_TEMP_BET_KEY)
 
-    # Only process if the user is in the 'ask_number' step
+    # Only process if we are in the 'ask_number' step
     if not temp_bet or temp_bet.get('step') != 'ask_number':
-        return # Ignore other text messages
+        # logger.debug(f"Ignoring text input from user {user.id} in chat {chat_id}, not in 'ask_number' step.")
+        return
 
     number_input = update.message.text.strip().lower()
+    prompt_message_id = temp_bet.get('prompt_message_id') # Get the ID of the message to edit
 
-    # Delete the user's number message for cleaner chat
-    try:
-        await update.message.delete()
-    except Exception as e:
-        logger.warning(f"Could not delete user number input message in chat {chat_id}: {e}")
+    # Delete the user's number input message for cleanliness
+    try: await update.message.delete()
+    except Exception as e: logger.debug(f"Could not delete user number input message in chat {chat_id}: {e}")
 
-
-    # Validate the input number
+    # Validate the input
     if number_input not in RL_AMERICAN_WHEEL_SET:
-        # Invalid number, re-prompt the user
-        # Get the message ID where the prompt was originally shown (the main game message)
-        # This might be fragile if messages get deleted unexpectedly
-        prompt_message_id = context.user_data.get(RL_USER_TEMP_BET_KEY, {}).get('prompt_message_id')
-        if not prompt_message_id: # Fallback to chat_data if not in user_data (though it should be)
-             prompt_message_id = context.chat_data.get(RL_GAME_KEY, {}).get('message_id')
-
         if prompt_message_id:
             try:
+                # Re-edit the prompt message to show error
                 await context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=prompt_message_id,
-                    text=f"➕ <b>Новая ставка</b>\nТип: 🔢 Число\n\n<b>Неверный ввод: '{html_escape(number_input)}'.</b>\nВведите число (0, 00, или 1-36) в чат:",
+                    chat_id=chat_id, message_id=prompt_message_id,
+                    text=f"➕ <b>Новая ставка</b>\nТип: 🔢 Число\n\n"
+                         f"<b>Неверный ввод: '{html_escape(number_input)}'.</b>\n"
+                         f"Введите число (0, 00, или 1-36) в чат:",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data='rl_cancel_bet_step')]]),
                     parse_mode=ParseMode.HTML
                 )
             except Exception as e:
-                 logger.error(f"Error editing message to show invalid number input: {e}")
-                 # If edit fails, maybe send a temporary message
-                 # await context.bot.send_message(chat_id, f"Неверный ввод: '{html_escape(number_input)}'. Введите 0, 00, или 1-36.")
-        return # Stop processing this invalid input
+                logger.error(f"Error editing message to show invalid number input: {e}")
+        else:
+            logger.error(f"Cannot show invalid number input error, prompt_message_id missing for user {user.id}.")
+        return # Wait for valid input
 
     # --- Valid Number Received ---
-    bet_type = temp_bet['type']
-    temp_bet['value'] = number_input # Store the validated number string
+    bet_type = temp_bet['type'] # Should be 'number'
+    temp_bet['value'] = number_input # Store the valid number string
     temp_bet['value_display'] = rl_get_value_display_name(bet_type, number_input)
-    temp_bet['step'] = 'amount' # Move to amount selection
+    temp_bet['step'] = 'amount' # Move to amount selection step
 
-    # Get balance for amount selection
-    get_or_create_user(user.id)
+    # Get balance for amount keyboard
     balance = get_balance(user.id)
     if balance is None:
-        await context.bot.send_message(chat_id, "Ошибка получения вашего баланса.")
-        context.user_data.pop(RL_USER_TEMP_BET_KEY, None) # Cancel bet
-        await rl_show_game_state(context, chat_id, edit_existing=True) # Restore main view
+        logger.error(f"Failed to get balance for user {user.id} during number bet.")
+        context.user_data.pop(RL_USER_TEMP_BET_KEY, None) # Cancel bet process
+        if prompt_message_id:
+            try: await context.bot.delete_message(chat_id, prompt_message_id) # Clean up prompt
+            except Exception: pass
+        await rl_show_game_state(context, chat_id, edit_existing=True) # Show main state
+        try: await context.bot.send_message(chat_id, "Ошибка получения вашего баланса. Ставка отменена.")
+        except Exception: pass
         return
 
-    # Edit the main game message (or the prompt message) to show amount selection
-    edit_message_id = context.user_data.get(RL_USER_TEMP_BET_KEY, {}).get('prompt_message_id') \
-                       or context.chat_data.get(RL_GAME_KEY, {}).get('message_id')
-
-    if edit_message_id:
+    # Edit the prompt message to ask for amount
+    if prompt_message_id:
         try:
             await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=edit_message_id,
-                text=f"➕ <b>Новая ставка</b>\nТип: {temp_bet['value_display']}\n\nВаш баланс: {balance:.2f} F\nВыберите сумму ставки:",
+                chat_id=chat_id, message_id=prompt_message_id,
+                text=f"➕ <b>Новая ставка</b>\nТип: {temp_bet['value_display']}\n\n"
+                     f"Ваш баланс: {balance:.2f} F\nВыберите сумму ставки:",
                 reply_markup=rl_get_bet_amount_keyboard(balance, bet_type),
                 parse_mode=ParseMode.HTML
             )
-            # Store the message ID being used for betting steps
-            temp_bet['prompt_message_id'] = edit_message_id
         except Exception as e:
             logger.error(f"Error editing message for amount selection after number input: {e}")
+            # If edit fails, try to revert to main state? Or send error message?
+            context.user_data.pop(RL_USER_TEMP_BET_KEY, None)
+            await rl_show_game_state(context, chat_id, edit_existing=True)
     else:
-         logger.error(f"Cannot find message ID to edit in chat {chat_id} during number input handling.")
+        logger.error(f"Cannot proceed with amount selection, prompt_message_id missing for user {user.id}.")
+        context.user_data.pop(RL_USER_TEMP_BET_KEY, None) # Cancel bet process
+        await rl_show_game_state(context, chat_id, edit_existing=True) # Restore main state
 
 
 async def rl_choose_bet_value_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles selection of bet value (Red, Black, Even, Odd, Dozen, Column)."""
     query = update.callback_query
+    if not query or not query.message or not query.from_user: return
     user = query.from_user
+    chat_id = query.message.chat_id
+
     temp_bet = context.user_data.get(RL_USER_TEMP_BET_KEY)
 
-    # Check step
+    # --- Validation ---
     if not temp_bet or temp_bet.get('step') != 'value':
         await query.answer("Неверный шаг или ставка отменена.", show_alert=True)
-        await rl_show_game_state(context, query.message.chat_id, edit_existing=True)
+        await rl_show_game_state(context, chat_id, edit_existing=True)
         return
 
-    await query.answer() # Acknowledge selection
+    await query.answer() # Acknowledge button press
     bet_value_choice = query.data.replace('rl_value_', '')
     bet_type = temp_bet['type']
     temp_bet['value'] = bet_value_choice
     temp_bet['value_display'] = rl_get_value_display_name(bet_type, bet_value_choice)
-    temp_bet['step'] = 'amount' # Move to next step
+    temp_bet['step'] = 'amount' # Move to amount selection
+    prompt_message_id = temp_bet.get('prompt_message_id', query.message.message_id)
+    temp_bet['prompt_message_id'] = prompt_message_id # Ensure it's stored
 
-    # Get balance
-    get_or_create_user(user.id)
+    # Get balance for amount keyboard
     balance = get_balance(user.id)
     if balance is None:
-        # Handle error, cancel bet
-        await query.edit_message_text("Ошибка получения вашего баланса. Ставка отменена.")
-        context.user_data.pop(RL_USER_TEMP_BET_KEY, None)
-        await rl_show_game_state(context, query.message.chat_id, edit_existing=True)
+        logger.error(f"Failed to get balance for user {user.id} during value bet selection.")
+        context.user_data.pop(RL_USER_TEMP_BET_KEY, None) # Cancel bet
+        try: await context.bot.delete_message(chat_id, prompt_message_id)
+        except Exception: pass
+        await rl_show_game_state(context, chat_id, edit_existing=True)
+        try: await context.bot.send_message(chat_id,"Ошибка получения вашего баланса. Ставка отменена.")
+        except Exception: pass
         return
 
     # Edit message to show amount selection
     try:
-        await query.edit_message_text(
-            text=f"➕ <b>Новая ставка</b>\nТип: {temp_bet['value_display']}\n\nВаш баланс: {balance:.2f} F\nВыберите сумму ставки:",
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=prompt_message_id,
+            text=f"➕ <b>Новая ставка</b>\nТип: {temp_bet['value_display']}\n\n"
+                 f"Ваш баланс: {balance:.2f} F\nВыберите сумму ставки:",
             reply_markup=rl_get_bet_amount_keyboard(balance, bet_type),
             parse_mode=ParseMode.HTML
         )
-        # Store the message ID being used for betting steps
-        temp_bet['prompt_message_id'] = query.message.message_id
     except BadRequest as e:
         if "message is not modified" not in str(e).lower():
-             logger.error(f"Error editing message for bet amount selection: {e}")
+            logger.error(f"Error editing message for bet amount selection (chat {chat_id}): {e}")
+    except Forbidden:
+         logger.error(f"Forbidden: Cannot edit message for bet amount selection in chat {chat_id}")
     except Exception as e:
-        logger.error(f"Error editing message for bet amount selection: {e}")
+        logger.error(f"Error editing message for bet amount selection (chat {chat_id}): {e}")
 
 
 async def rl_choose_bet_amount_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles selection of the bet amount."""
     query = update.callback_query
+    if not query or not query.message or not query.from_user: return
     user = query.from_user
+    chat_id = query.message.chat_id
+
     temp_bet = context.user_data.get(RL_USER_TEMP_BET_KEY)
 
-    # Check step
+    # --- Validation ---
     if not temp_bet or temp_bet.get('step') != 'amount':
         await query.answer("Неверный шаг или ставка отменена.", show_alert=True)
-        await rl_show_game_state(context, query.message.chat_id, edit_existing=True)
+        await rl_show_game_state(context, chat_id, edit_existing=True)
         return
 
-    # Parse amount from callback data
+    # Extract amount
     try:
         bet_amount = int(query.data.replace('rl_amount_', ''))
     except ValueError:
         await query.answer("Неверное значение суммы.", show_alert=True)
         return
 
-    # Validate amount against balance
-    get_or_create_user(user.id)
+    # Check balance
     balance = get_balance(user.id)
     bet_type = temp_bet.get('type', 'unknown') # Get type for back button context
+    prompt_message_id = temp_bet.get('prompt_message_id', query.message.message_id)
+    temp_bet['prompt_message_id'] = prompt_message_id # Ensure stored
 
     if balance is None:
-        await query.edit_message_text("Ошибка получения вашего баланса. Ставка отменена.")
-        context.user_data.pop(RL_USER_TEMP_BET_KEY, None)
-        await rl_show_game_state(context, query.message.chat_id, edit_existing=True)
+        logger.error(f"Failed to get balance for user {user.id} during amount selection.")
+        context.user_data.pop(RL_USER_TEMP_BET_KEY, None) # Cancel bet
+        try: await context.bot.delete_message(chat_id, prompt_message_id)
+        except Exception: pass
+        await rl_show_game_state(context, chat_id, edit_existing=True)
+        try: await context.bot.send_message(chat_id, "Ошибка получения вашего баланса. Ставка отменена.")
+        except Exception: pass
         return
 
     if not (0 < bet_amount <= balance):
-        # Invalid amount or insufficient funds
         await query.answer(f"Недостаточно средств ({balance:.2f} F) или неверная сумма.", show_alert=True)
-        # Re-show amount selection with error indication (optional, but helpful)
+        # Re-show amount selection with error indication (optional, can just rely on alert)
         try:
-            await query.edit_message_text(
-                text=f"➕ <b>Новая ставка</b>\nТип: {temp_bet.get('value_display', 'N/A')}\n\nВаш баланс: {balance:.2f} F\n<b>Неверная сумма!</b> Выберите сумму ставки:",
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=prompt_message_id,
+                text=f"➕ <b>Новая ставка</b>\nТип: {temp_bet.get('value_display', 'N/A')}\n\n"
+                     f"Ваш баланс: {balance:.2f} F\n"
+                     f"<b>Неверная сумма ({bet_amount} F)!</b> Выберите сумму ставки:", # Highlight error
                 reply_markup=rl_get_bet_amount_keyboard(balance, bet_type),
                 parse_mode=ParseMode.HTML
             )
@@ -2462,33 +2787,32 @@ async def rl_choose_bet_amount_callback(update: Update, context: ContextTypes.DE
                  logger.error(f"Error re-editing message for invalid amount: {e}")
         except Exception as e:
             logger.error(f"Error re-editing message for invalid amount: {e}")
-        return # Stop processing
+        return # Don't proceed
 
-    # --- Valid Amount Selected ---
+    # --- Amount Valid, Proceed to Confirmation ---
     await query.answer() # Acknowledge selection
     temp_bet['amount'] = bet_amount
     temp_bet['step'] = 'confirm' # Move to confirmation step
 
-    # Edit message to show confirmation prompt
+    # Fetch user display name for confirmation message
+    _, display_name = await get_user_mention(context, user.id)
+
     try:
-        # Get user's display name for the confirmation message
-        _, display_name = await get_user_mention(context, user.id)
-        await query.edit_message_text(
-            text=(
-                f"➕ <b>Подтверждение ставки</b>\n"
-                f" - Игрок: {display_name}\n"
-                f" - Ставка: {temp_bet['value_display']}\n"
-                f" - Сумма: {temp_bet['amount']} F\n\n"
-                f"Подтверждаете?"
-            ),
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=prompt_message_id,
+            text=(f"➕ <b>Подтверждение ставки</b>\n"
+                  f" - Игрок: {display_name}\n"
+                  f" - Ставка: {temp_bet['value_display']}\n"
+                  f" - Сумма: {temp_bet['amount']} F\n\n"
+                  f"Подтверждаете?"),
             reply_markup=rl_get_confirmation_keyboard(),
             parse_mode=ParseMode.HTML
         )
-        # Store the message ID being used for betting steps
-        temp_bet['prompt_message_id'] = query.message.message_id
     except BadRequest as e:
         if "message is not modified" not in str(e).lower():
-             logger.error(f"Error editing message for confirmation: {e}")
+            logger.error(f"Error editing message for confirmation: {e}")
+    except Forbidden:
+        logger.error(f"Forbidden: Cannot edit message for confirmation in chat {chat_id}")
     except Exception as e:
         logger.error(f"Error editing message for confirmation: {e}")
 
@@ -2496,44 +2820,52 @@ async def rl_choose_bet_amount_callback(update: Update, context: ContextTypes.DE
 async def rl_confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the 'Yes' confirmation button press and starts timers if first bet."""
     query = update.callback_query
+    if not query or not query.message or not query.from_user: return
     user = query.from_user
     chat_id = query.message.chat_id
+    prompt_message_id = query.message.message_id # This is the ID of the confirmation message
+
     temp_bet = context.user_data.get(RL_USER_TEMP_BET_KEY)
 
-    # Check step
+    # --- Validation ---
     if not temp_bet or temp_bet.get('step') != 'confirm':
         await query.answer("Неверный шаг или ставка отменена.", show_alert=True)
-        await rl_show_game_state(context, chat_id, edit_existing=True) # Restore main view
+        await rl_show_game_state(context, chat_id, edit_existing=True)
         return
 
-    # --- Final Checks Before Placing Bet ---
-    chat_data = context.chat_data
+    chat_data = context.application.chat_data.get(chat_id, {})
     game_state = chat_data.get(RL_GAME_KEY)
 
-    # Check if betting is still allowed
     if not game_state or game_state.get('state') != 'accepting_bets':
         await query.answer("Ставки больше не принимаются.", show_alert=True)
         context.user_data.pop(RL_USER_TEMP_BET_KEY, None) # Clear temp bet
-        await rl_show_game_state(context, chat_id, edit_existing=True) # Show final state
+        # Delete the confirmation message and show main state
+        try: await context.bot.delete_message(chat_id, prompt_message_id)
+        except Exception: pass
+        await rl_show_game_state(context, chat_id, edit_existing=True)
         return
 
+    # Final checks before placing bet
     bet_amount = temp_bet.get('amount', 0)
-    get_or_create_user(user.id)
-    balance = get_balance(user.id) # Re-check balance just in case
+    balance = get_balance(user.id)
 
     if balance is None:
         await query.answer("Ошибка получения баланса.", show_alert=True)
         context.user_data.pop(RL_USER_TEMP_BET_KEY, None)
+        try: await context.bot.delete_message(chat_id, prompt_message_id)
+        except Exception: pass
         await rl_show_game_state(context, chat_id, edit_existing=True)
         return
 
     if not (0 < bet_amount <= balance):
-        await query.answer(f"Недостаточно средств ({balance:.2f} F).", show_alert=True)
+        await query.answer(f"Недостаточно средств ({balance:.2f} F) или неверная сумма.", show_alert=True)
         context.user_data.pop(RL_USER_TEMP_BET_KEY, None)
+        try: await context.bot.delete_message(chat_id, prompt_message_id)
+        except Exception: pass
         await rl_show_game_state(context, chat_id, edit_existing=True)
         return
 
-    # Check round and user bet limits again
+    # Check game limits again
     active_bets_by_user = game_state.get('active_bets', {})
     total_bets_count = sum(len(bets) for bets in active_bets_by_user.values())
     user_bets_count = len(active_bets_by_user.get(user.id, []))
@@ -2541,38 +2873,44 @@ async def rl_confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_
     if total_bets_count >= RL_MAX_BETS_PER_ROUND:
         await query.answer(f"Достигнут общий лимит ставок ({RL_MAX_BETS_PER_ROUND})!", show_alert=True)
         context.user_data.pop(RL_USER_TEMP_BET_KEY, None)
+        try: await context.bot.delete_message(chat_id, prompt_message_id)
+        except Exception: pass
         await rl_show_game_state(context, chat_id, edit_existing=True)
         return
     if user_bets_count >= RL_MAX_BETS_PER_USER:
         await query.answer(f"Вы достигли своего лимита ставок ({RL_MAX_BETS_PER_USER})!", show_alert=True)
         context.user_data.pop(RL_USER_TEMP_BET_KEY, None)
+        try: await context.bot.delete_message(chat_id, prompt_message_id)
+        except Exception: pass
         await rl_show_game_state(context, chat_id, edit_existing=True)
         return
 
-    # --- Place the Bet ---
-    # 1. Deduct balance
+    # --- All checks passed, place the bet ---
     new_balance = update_balance(user.id, -bet_amount)
     if new_balance is None:
         await query.answer("Ошибка списания средств со счета!", show_alert=True)
         context.user_data.pop(RL_USER_TEMP_BET_KEY, None)
+        try: await context.bot.delete_message(chat_id, prompt_message_id)
+        except Exception: pass
         await rl_show_game_state(context, chat_id, edit_existing=True)
         return
 
-    # 2. Add bet to game_state
+    # Create final bet dictionary
     final_bet = {
-        'type': temp_bet['type'],
-        'value': temp_bet['value'],
-        'amount': bet_amount, # Use validated amount
-        'value_display': temp_bet['value_display']
+        'type': temp_bet.get('type'),
+        'value': temp_bet.get('value'),
+        'amount': bet_amount,
+        'value_display': temp_bet.get('value_display', 'N/A')
     }
+
+    # Add bet to chat_data game state
     if user.id not in active_bets_by_user:
         active_bets_by_user[user.id] = []
     active_bets_by_user[user.id].append(final_bet)
-    game_state['active_bets'] = active_bets_by_user # Update game state
+    game_state['active_bets'] = active_bets_by_user # Update state
 
-    # 3. Clean up temporary user data
+    # Clear temporary user data
     context.user_data.pop(RL_USER_TEMP_BET_KEY, None)
-
     await query.answer("✅ Ставка принята!")
     logger.info(f"User {user.id} placed bet in chat {chat_id}: {final_bet}")
 
@@ -2580,111 +2918,138 @@ async def rl_confirm_bet_callback(update: Update, context: ContextTypes.DEFAULT_
     current_total_bets = sum(len(bets) for bets in active_bets_by_user.values())
     spin_timer_job_name = f'rl_spin_timer_{chat_id}'
     display_timer_job_name = f'rl_display_timer_{chat_id}'
+
+    # Check if timers already exist for this chat
     spin_timer_exists = bool(context.job_queue.get_jobs_by_name(spin_timer_job_name))
     display_timer_exists = bool(context.job_queue.get_jobs_by_name(display_timer_job_name))
 
-    # Start timers only if it's the very first bet of the round and timers aren't already running
     if current_total_bets == 1 and not spin_timer_exists and not display_timer_exists:
-        # Schedule the main one-shot timer to trigger the spin
+        # Schedule the main spin timer
         context.job_queue.run_once(
             rl_spin_roulette_job,
             RL_BET_TIMER_SECONDS,
-            chat_id=chat_id,
+            chat_id=chat_id, # Pass chat_id to job context
             name=spin_timer_job_name,
-            data={'chat_id': chat_id}
+            data={'chat_id': chat_id} # Pass data needed by job
         )
-        game_state['timer_job_name'] = spin_timer_job_name # Store main timer name
+        game_state['timer_job_name'] = spin_timer_job_name # Store name in state
 
-        # Schedule the repeating timer to update the display
+        # Schedule the repeating display timer
         context.job_queue.run_repeating(
             rl_update_timer_display_job,
             interval=RL_TIMER_DISPLAY_UPDATE_INTERVAL,
-            first=0.1, # Start updating quickly
-            chat_id=chat_id,
+            first=0.1, # Start quickly after first bet
+            chat_id=chat_id, # Pass chat_id
             name=display_timer_job_name,
-            data={'chat_id': chat_id, 'main_timer_job_name': spin_timer_job_name}
+            data={'chat_id': chat_id, 'main_timer_job_name': spin_timer_job_name} # Pass needed data
         )
-        game_state['timer_display_job_name'] = display_timer_job_name # Store display timer name
-
+        game_state['timer_display_job_name'] = display_timer_job_name # Store name
         logger.info(f"Started roulette timers for chat {chat_id}: Spin='{spin_timer_job_name}', Display='{display_timer_job_name}'")
-    # *** END MODIFIED SECTION ***
+    elif not spin_timer_exists and current_total_bets > 0:
+         logger.warning(f"Bets exist ({current_total_bets}) but spin timer job '{spin_timer_job_name}' not found for chat {chat_id}. Timer might not have started correctly.")
+         # Optionally try restarting timer here? Risky.
 
-    # --- Update Game Display ---
-    # Show the main game state again, now including the new bet and possibly timer info
+
+    # --- Update Main Game Message ---
+    # Delete the confirmation message first
+    try: await context.bot.delete_message(chat_id, prompt_message_id)
+    except Exception as e: logger.warning(f"Could not delete confirmation message {prompt_message_id}: {e}")
+
+    # Show the updated main game state (with the new bet listed)
     await rl_show_game_state(context, chat_id, message_text=None, edit_existing=True)
 
 
 async def rl_cancel_bet_step_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles Cancel button presses during bet creation."""
     query = update.callback_query
+    if not query or not query.message or not query.from_user: return
     user = query.from_user
     chat_id = query.message.chat_id
-    message_id = query.message.message_id # ID of the message with betting buttons
+    prompt_message_id = query.message.message_id # ID of message with cancel button
 
-    # Remove temporary bet data
+    # Clear temporary bet data
     context.user_data.pop(RL_USER_TEMP_BET_KEY, None)
     await query.answer("Действие отменено.")
 
-    # Restore the main game view by editing the betting message back
-    # This assumes the betting process happened by editing the main game message
+    # Delete the bet creation message and show the main game state again
+    try: await context.bot.delete_message(chat_id, prompt_message_id)
+    except Exception as e: logger.warning(f"Could not delete bet creation message {prompt_message_id} on cancel: {e}")
+
     await rl_show_game_state(context, chat_id, message_text="Создание ставки отменено.", edit_existing=True)
 
 
 async def rl_back_to_bet_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles Back button press to return to bet type selection."""
     query = update.callback_query
+    if not query or not query.message or not query.from_user: return
+    user = query.from_user # Keep user variable consistent
+    chat_id = query.message.chat_id
+
     temp_bet = context.user_data.get(RL_USER_TEMP_BET_KEY)
+    prompt_message_id = query.message.message_id # ID of message with back button
 
-    # Only proceed if temporary bet data exists
     if temp_bet:
-        # Reset the temporary bet state to 'type' selection
-        # Keep prompt_message_id if it exists
-        prompt_msg_id = temp_bet.get('prompt_message_id')
-        context.user_data[RL_USER_TEMP_BET_KEY] = {'step': 'type'}
-        if prompt_msg_id: context.user_data[RL_USER_TEMP_BET_KEY]['prompt_message_id'] = prompt_msg_id
+        # Reset step to 'type', keep prompt_message_id if available
+        original_prompt_id = temp_bet.get('prompt_message_id', prompt_message_id)
+        context.user_data[RL_USER_TEMP_BET_KEY] = {
+            'step': 'type',
+            'prompt_message_id': original_prompt_id
+        }
+        await query.answer() # Acknowledge back button
 
-        await query.answer() # Acknowledge button press
-
-        # Edit the message back to the type selection screen
         try:
-            await query.edit_message_text(
+            # Edit the message back to type selection
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=original_prompt_id,
                 text="➕ <b>Новая ставка</b>\nВыберите тип ставки:",
                 reply_markup=rl_get_bet_type_keyboard(),
                 parse_mode=ParseMode.HTML
             )
         except BadRequest as e:
             if "message is not modified" not in str(e).lower():
-                 logger.error(f"Error editing message for back to bet type: {e}")
+                logger.error(f"Error editing message for back to bet type: {e}")
         except Exception as e:
             logger.error(f"Error editing message for back to bet type: {e}")
+            # If edit fails, maybe try reverting to main state?
+            context.user_data.pop(RL_USER_TEMP_BET_KEY, None)
+            try: await context.bot.delete_message(chat_id, original_prompt_id)
+            except Exception: pass
+            await rl_show_game_state(context, chat_id, edit_existing=True)
     else:
-        # If no temp data, just cancel
-        await query.answer("Отмена.")
+        # Temp bet data lost, just cancel
+        await query.answer("Отмена (ошибка состояния).")
+        try: await context.bot.delete_message(chat_id, prompt_message_id)
+        except Exception: pass
         await rl_show_game_state(context, query.message.chat_id, edit_existing=True)
 
 
 async def rl_back_to_bet_value_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles Back button press from amount selection to value selection (not for 'number' type)."""
     query = update.callback_query
-    temp_bet = context.user_data.get(RL_USER_TEMP_BET_KEY)
+    if not query or not query.message or not query.from_user: return
+    user = query.from_user
+    chat_id = query.message.chat_id
 
-    # Only proceed if temp data exists and type is NOT 'number'
+    temp_bet = context.user_data.get(RL_USER_TEMP_BET_KEY)
+    prompt_message_id = query.message.message_id # ID of message with back button
+
+    # Check if bet type exists and is not 'number'
     if temp_bet and 'type' in temp_bet and temp_bet.get('type') != 'number':
         bet_type = temp_bet['type']
-        # Reset state to 'value' selection for the current type
-        prompt_msg_id = temp_bet.get('prompt_message_id')
-        temp_bet_reset = {'step': 'value', 'type': bet_type}
-        if prompt_msg_id: temp_bet_reset['prompt_message_id'] = prompt_msg_id
-        context.user_data[RL_USER_TEMP_BET_KEY] = temp_bet_reset
+        # Reset step to 'value', keep type and prompt_id
+        original_prompt_id = temp_bet.get('prompt_message_id', prompt_message_id)
+        context.user_data[RL_USER_TEMP_BET_KEY] = {
+            'step': 'value',
+            'type': bet_type,
+            'prompt_message_id': original_prompt_id
+        }
+        await query.answer() # Acknowledge button
 
-        await query.answer()
-
-        # Get display name for the type
         type_display = RL_BET_VALUE_DISPLAY_NAMES.get(bet_type.capitalize(), bet_type)
-
-        # Edit message back to value selection screen
         try:
-            await query.edit_message_text(
+            # Edit message back to value selection
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=original_prompt_id,
                 text=f"➕ <b>Новая ставка</b>\nТип: {type_display}\n\nВыберите значение:",
                 reply_markup=rl_get_bet_value_keyboard(bet_type),
                 parse_mode=ParseMode.HTML
@@ -2694,8 +3059,13 @@ async def rl_back_to_bet_value_callback(update: Update, context: ContextTypes.DE
                  logger.error(f"Error editing message for back to bet value: {e}")
         except Exception as e:
             logger.error(f"Error editing message for back to bet value: {e}")
+            # If edit fails, revert to main state
+            context.user_data.pop(RL_USER_TEMP_BET_KEY, None)
+            try: await context.bot.delete_message(chat_id, original_prompt_id)
+            except Exception: pass
+            await rl_show_game_state(context, chat_id, edit_existing=True)
     else:
-        # If type is 'number' or temp data is missing, go back to type selection instead
+        # If type is number or temp_bet is broken, go all the way back to type selection
         await rl_back_to_bet_type_callback(update, context)
 
 
@@ -2703,28 +3073,26 @@ async def rl_spin_roulette_logic(context: ContextTypes.DEFAULT_TYPE, chat_id: in
     """Contains the core logic for spinning the wheel and determining results."""
     chat_data = context.application.chat_data.get(chat_id, {})
     game_state = chat_data.get(RL_GAME_KEY)
-    bot = context.bot
+    bot = context.bot # Use context.bot
 
     if not game_state:
         logger.error(f"Spin logic called for chat {chat_id} but no game state found.")
         return
 
-    # Allow spin if state is 'accepting_bets' (triggered by timer/button)
-    if game_state.get('state') != 'accepting_bets':
-        if game_state.get('state') == 'spinning':
-            logger.warning(f"Spin logic called again for chat {chat_id} while already spinning. Ignoring.")
-        else:
-             logger.warning(f"Spin logic called for chat {chat_id} but state is '{game_state.get('state')}'. Aborting spin.")
+    # --- State and Bet Validation ---
+    current_state = game_state.get('state')
+    if current_state == 'spinning':
+        logger.warning(f"Spin logic called again for chat {chat_id} while already spinning. Ignoring.")
+        return
+    if current_state != 'accepting_bets':
+        logger.warning(f"Spin logic called for chat {chat_id} but state is '{current_state}'. Aborting spin.")
         return
 
-    # Make a copy of bets to process, as game_state might change
-    active_bets_by_user = dict(game_state.get('active_bets', {})) # Use dict() for a shallow copy
-
-    # Check if there are actually any bets
+    active_bets_by_user = dict(game_state.get('active_bets', {})) # Create a copy
     if not active_bets_by_user:
         logger.warning(f"Spin logic called for chat {chat_id} but no bets found.")
-        game_state['state'] = 'finished' # Reset state to finished/idle
-        # Clean up any lingering timers if somehow spin was triggered with no bets
+        game_state['state'] = 'finished' # Mark as finished
+        # Clean up timers (display timer should have been removed by now)
         spin_timer_name = game_state.pop('timer_job_name', None)
         display_timer_name = game_state.pop('timer_display_job_name', None)
         if spin_timer_name: await rl_remove_job_if_exists(spin_timer_name, context)
@@ -2733,265 +3101,305 @@ async def rl_spin_roulette_logic(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         msg_id = game_state.get('message_id')
         if msg_id:
             try:
-                final_reply_markup = rl_get_main_menu_keyboard(chat_data, {})
+                display_names = await rl_get_display_name_map(context, [])
+                final_reply_markup = rl_get_main_menu_keyboard(chat_data, display_names)
                 await bot.edit_message_text(
                     chat_id, msg_id,
                     "Ставок не было, раунд завершен.\nНажмите 'Начать новый раунд' ниже.",
                     reply_markup=final_reply_markup)
-            except Exception: pass
+            except Exception as e: logger.warning(f"Failed to edit no-bets message: {e}")
         return
 
+    # --- Prepare for Spin ---
     message_id = game_state.get('message_id')
     if not message_id:
         logger.error(f"Cannot spin roulette in chat {chat_id}, message_id is missing.")
         try: await bot.send_message(chat_id, "❌ Ошибка: Не найдено сообщение для отображения спина!")
         except Exception: pass
-        # Clean up broken game state and timers
-        spin_timer_name = game_state.pop('timer_job_name', None) if game_state else None
-        display_timer_name = game_state.pop('timer_display_job_name', None) if game_state else None
+        # Clean up broken game state
+        timer_job = game_state.pop('timer_job_name', None)
+        display_timer_job = game_state.pop('timer_display_job_name', None)
         chat_data.pop(RL_GAME_KEY, None)
-        if spin_timer_name: await rl_remove_job_if_exists(spin_timer_name, context)
-        if display_timer_name: await rl_remove_job_if_exists(display_timer_name, context)
+        if timer_job: await rl_remove_job_if_exists(timer_job, context)
+        if display_timer_job: await rl_remove_job_if_exists(display_timer_job, context)
         return
 
-    # --- Set State to Spinning & Clean Timers ---
+    # Update state and remove timers
     game_state['state'] = 'spinning'
-    spin_timer_name = game_state.pop('timer_job_name', None) # Remove main timer name
-    display_timer_name = game_state.pop('timer_display_job_name', None) # Remove display timer name
-
-    if spin_timer_name:
-        await rl_remove_job_if_exists(spin_timer_name, context) # Ensure main timer job is cancelled
-        logger.debug(f"Removed spin timer '{spin_timer_name}' before animation start in chat {chat_id}")
-    if display_timer_name:
-        await rl_remove_job_if_exists(display_timer_name, context) # Ensure display timer job is cancelled
-        logger.debug(f"Removed display timer '{display_timer_name}' before animation start in chat {chat_id}")
-    # *** END MODIFIED SECTION ***
+    spin_timer_name = game_state.pop('timer_job_name', None)
+    display_timer_name = game_state.pop('timer_display_job_name', None)
+    if spin_timer_name: await rl_remove_job_if_exists(spin_timer_name, context)
+    if display_timer_name: await rl_remove_job_if_exists(display_timer_name, context)
+    logger.debug(f"Removed timers '{spin_timer_name}', '{display_timer_name}' before animation start in chat {chat_id}")
 
     # --- Determine Winning Number ---
     winning_number_str = random.choice(AMERICAN_WHEEL_ORDER)
-    target_index = AMERICAN_WHEEL_ORDER.index(winning_number_str)
+    try:
+        target_index = AMERICAN_WHEEL_ORDER.index(winning_number_str)
+    except ValueError:
+        logger.error(f"Winning number '{winning_number_str}' not found in wheel order! Defaulting to '0'.")
+        winning_number_str = '0'
+        target_index = 0
     logger.info(f"Roulette spin result for chat {chat_id}: {winning_number_str} (index {target_index})")
 
-    # --- Animation Parameters ---
+    # --- Animation Setup ---
     spin_duration = RL_SPIN_ANIMATION_DURATION
     min_full_rotations = 2
     max_full_rotations = 4
-    frames_per_second = 2.5 # How many times to update the message per second (approx)
-    update_interval = 1.0 / frames_per_second
-    spinner_emojis = ['◜','◝','◞','◟'] # Simple spinner
+    updates_per_second = 4 # How many times to update the message per second
+    update_interval = 1.0 / updates_per_second
+    spinner_emojis = ['[∙∙∙ ]', '[∙∙ ]', '[∙ ]', '[ ]'] # Alternative spinner
 
     # Calculate animation steps
     start_index = random.randint(0, RL_WHEEL_SIZE - 1)
     current_index = start_index
     num_full_rotations = random.randint(min_full_rotations, max_full_rotations)
     steps_for_rotations = num_full_rotations * RL_WHEEL_SIZE
+    # Steps needed to get from start_index to target_index
     steps_to_target = (target_index - start_index + RL_WHEEL_SIZE) % RL_WHEEL_SIZE
     total_steps = steps_for_rotations + steps_to_target
-    if total_steps == 0: total_steps = RL_WHEEL_SIZE # Ensure at least one visual step
+    if total_steps == 0: total_steps = RL_WHEEL_SIZE # Ensure at least one rotation if start==target
+
     logger.info(f"Roulette Animation chat {chat_id}: Start={start_index}, Target={target_index}, Rot={num_full_rotations}, Steps={total_steps}")
 
-    # --- Run Animation ---
+    # Initial message update
     try:
-        # Initial "spinning" message update (remove keyboard)
         await bot.edit_message_text(
-            "🎰 <b>Колесо вращается...</b>",
-            chat_id=chat_id, message_id=message_id, reply_markup=None, parse_mode=ParseMode.HTML
+            "🎰 <b>Колесо вращается...</b>", chat_id=chat_id, message_id=message_id,
+            reply_markup=None, parse_mode=ParseMode.HTML
         )
-        await asyncio.sleep(0.5) # Short pause before animation starts
+        await asyncio.sleep(0.5) # Small pause before animation starts
     except Exception as e:
         logger.warning(f"Failed to edit message {message_id} for spin start in chat {chat_id}: {e}")
+        # Continue without initial message if edit fails
 
+    # --- Animation Loop ---
     loop_start_time = time.monotonic()
     steps_taken = 0
-    next_update_time_budget = loop_start_time
+    next_update_time = loop_start_time
     last_displayed_number = ""
     animation_successful = True
 
-    def ease_out_cubic(t):
+    def ease_out_cubic(t): # t goes from 0 to 1
         t -= 1
         return t * t * t + 1
 
     while steps_taken < total_steps:
-        progress = (steps_taken + 1) / total_steps
+        # Calculate progress and time budget for this step using easing
+        progress = min(1.0, (steps_taken + 1) / total_steps)
         eased_progress = ease_out_cubic(progress)
         target_step_end_time = loop_start_time + spin_duration * eased_progress
         current_mono_time = time.monotonic()
 
-        if current_mono_time >= next_update_time_budget:
+        # Update message only at intervals
+        if current_mono_time >= next_update_time:
             display_number = AMERICAN_WHEEL_ORDER[current_index]
             color_char = rl_get_color(display_number)
             display_color_emoji = "🟢" if color_char == 'Green' else ("🔴" if color_char == 'Red' else "⚫")
             spinner = spinner_emojis[steps_taken % len(spinner_emojis)]
             frame_text = f"🎰 {spinner} {display_color_emoji} {display_number}"
 
-            if display_number != last_displayed_number:
+            # Avoid editing if text hasn't changed (reduces API calls)
+            if frame_text != last_displayed_number: # Use frame_text for comparison now
                 try:
                     await bot.edit_message_text(
                         text=frame_text, chat_id=chat_id, message_id=message_id
                     )
-                    last_displayed_number = display_number
-                    next_update_time_budget = current_mono_time + update_interval
+                    last_displayed_number = frame_text # Store the full text sent
                 except BadRequest as e:
-                    if "Message is not modified" in str(e).lower(): pass
-                    else: logger.warning(f"BadRequest editing animation chat {chat_id} (step {steps_taken}): {e}"); animation_successful = False; break
-                except Forbidden: logger.error(f"Forbidden error during animation in chat {chat_id}. Aborting."); animation_successful = False; break
-                except Exception as e: logger.warning(f"Error editing animation chat {chat_id} (step {steps_taken}): {e}"); animation_successful = False; break
-            else:
-                next_update_time_budget = current_mono_time + update_interval
+                    if "message is not modified" in str(e).lower():
+                        pass # Ignore this specific error
+                    else:
+                        logger.warning(f"BadRequest editing animation chat {chat_id} (step {steps_taken}): {e}")
+                        # Continue animation? Or break? Let's try continuing.
+                except Forbidden:
+                    logger.error(f"Forbidden error during animation in chat {chat_id}. Aborting.")
+                    animation_successful = False
+                    break
+                except Exception as e:
+                    logger.warning(f"Error editing animation chat {chat_id} (step {steps_taken}): {e}")
+                    # Optionally break animation on other errors
+                    # animation_successful = False
+                    # break
+            # Schedule next update
+            next_update_time = current_mono_time + update_interval
 
+        # Calculate sleep duration to match target time
         current_mono_time = time.monotonic()
         sleep_duration = max(0.005, target_step_end_time - current_mono_time)
         await asyncio.sleep(sleep_duration)
 
+        # Move to next step
         current_index = (current_index + 1) % RL_WHEEL_SIZE
         steps_taken += 1
 
-    # --- Show Final Result (Briefly) ---
+    # --- Show Final Result ---
     if animation_successful:
-      try:
-          final_color_char = rl_get_color(winning_number_str)
-          final_color_emoji = "🟢" if final_color_char == 'Green' else ("🔴" if final_color_char == 'Red' else "⚫")
-          await bot.edit_message_text(
-              text=f"<b>➡️ {final_color_emoji} {winning_number_str} ⬅️</b>",
-              chat_id=chat_id, message_id=message_id, parse_mode=ParseMode.HTML
-          )
-          await asyncio.sleep(1.5) # Pause on the winning number
-      except Exception as e:
-          logger.warning(f"Failed to show final animation number for chat {chat_id}: {e}")
+        try:
+            final_color_char = rl_get_color(winning_number_str)
+            final_color_emoji = "🟢" if final_color_char == 'Green' else ("🔴" if final_color_char == 'Red' else "⚫")
+            await bot.edit_message_text(
+                text=f"<b>➡️ {final_color_emoji} {winning_number_str} ⬅️</b>",
+                chat_id=chat_id, message_id=message_id,
+                parse_mode=ParseMode.HTML
+            )
+            await asyncio.sleep(1.5) # Pause on the winning number
+        except Exception as e:
+            logger.warning(f"Failed to show final animation number for chat {chat_id}: {e}")
 
-    # --- Calculate Winnings ---
+    # --- Determine Winners and Losers ---
     winning_color = rl_get_color(winning_number_str)
     winning_parity = rl_is_even_or_odd(winning_number_str)
     winning_dozen = rl_get_dozen(winning_number_str)
     winning_column = rl_get_column(winning_number_str)
 
-    results_by_user = defaultdict(lambda: {'wins': 0, 'returned': 0, 'log': [], 'bets': []})
-    total_net_change = 0
+    results_by_user = defaultdict(lambda: {'wins': 0.0, 'returned': 0.0, 'log': [], 'bets': []})
+    total_net_change = 0.0
 
     for user_id, bets in active_bets_by_user.items():
         user_results = results_by_user[user_id]
-        user_results['bets'] = bets
+        user_results['bets'] = bets # Store original bets for reference
+        total_bet_this_user = 0.0
 
         for bet in bets:
+            if not isinstance(bet, dict): continue # Skip invalid bet entries
+
             win = False
             payout_mult = 0
             bet_type = bet.get('type')
-            bet_value = bet.get('value')
+            bet_value = bet.get('value') # Raw value (e.g., 'Red', '1st', 5)
             bet_amount = bet.get('amount', 0)
-            value_disp = bet.get('value_display', 'N/A')
+            value_disp = bet.get('value_display', 'N/A') # Display name
 
-            if not all([bet_type, bet_value, bet_amount > 0]):
+            if not all([bet_type, bet_value is not None, bet_amount > 0]):
                 logger.warning(f"Skipping malformed bet for user {user_id} in chat {chat_id}: {bet}")
                 continue
 
-            if bet_type == 'number' and str(bet_value) == winning_number_str: payout_mult, win = RL_PAYOUTS['number'], True
-            elif bet_type == 'color' and bet_value == winning_color: payout_mult, win = RL_PAYOUTS['color'], True
-            elif bet_type == 'parity' and bet_value == winning_parity: payout_mult, win = RL_PAYOUTS['parity'], True
-            elif bet_type == 'dozen' and bet_value == winning_dozen: payout_mult, win = RL_PAYOUTS['dozen'], True
-            elif bet_type == 'column' and bet_value == winning_column: payout_mult, win = RL_PAYOUTS['column'], True
+            total_bet_this_user += bet_amount
 
+            # Check win conditions
+            if bet_type == 'number' and str(bet_value) == winning_number_str:
+                payout_mult = RL_PAYOUTS['number']
+                win = True
+            elif bet_type == 'color' and bet_value == winning_color:
+                payout_mult = RL_PAYOUTS['color']
+                win = True
+            elif bet_type == 'parity' and bet_value == winning_parity:
+                payout_mult = RL_PAYOUTS['parity']
+                win = True
+            elif bet_type == 'dozen' and bet_value == winning_dozen:
+                payout_mult = RL_PAYOUTS['dozen']
+                win = True
+            elif bet_type == 'column' and bet_value == winning_column:
+                payout_mult = RL_PAYOUTS['column']
+                win = True
+
+            # Calculate results
             if win:
                 winnings = bet_amount * payout_mult
-                returned = bet_amount + winnings
+                returned = bet_amount + winnings # Amount to give back (original + win)
                 user_results['wins'] += winnings
                 user_results['returned'] += returned
-                user_results['log'].append(f"✅ {value_disp} ({bet_amount}F) -> +{winnings:.2f}F")
+                user_results['log'].append(f"✅ {value_disp} ({bet_amount:.2f}F) -> +{winnings:.2f}F")
             else:
-                user_results['log'].append(f"❌ {value_disp} ({bet_amount}F)")
+                user_results['log'].append(f"❌ {value_disp} ({bet_amount:.2f}F)")
+                # No winnings, no return amount added for this bet
 
     # --- Format Results and Update Balances ---
     result_lines = []
     player_ids = list(results_by_user.keys())
+    # Fetch mentions efficiently
     html_mention_map = {}
-
     if player_ids:
          try:
-             mention_data = await asyncio.gather(*(get_user_mention(context, uid) for uid in player_ids))
-             html_mention_map = {uid: mention_data[i][0] for i, uid in enumerate(player_ids)} # Use HTML mention
+             mention_data_list = await asyncio.gather(*(get_user_mention(context, uid) for uid in player_ids))
+             html_mention_map = {uid: mention_data[0] for i, uid in enumerate(player_ids) for mention_data in [mention_data_list[i]]}
          except Exception as e:
              logger.error(f"Failed to fetch HTML mentions for roulette results in chat {chat_id}: {e}")
              html_mention_map = {uid: f"User_{uid}" for uid in player_ids} # Fallback
 
     processed_users = set()
-
     for user_id, results in results_by_user.items():
         processed_users.add(user_id)
-        user_mention_html = html_mention_map.get(user_id, f"User_{user_id}") # Get mention or fallback
-        amount_to_pay = results['returned']
-        total_bet_amount = sum(b['amount'] for b in results['bets'])
-        net_change = amount_to_pay - total_bet_amount
+        user_mention_html = html_mention_map.get(user_id, f"User_{user_id}")
+        amount_to_pay = results.get('returned', 0.0)
+        # Calculate total bet amount for this user from stored bets
+        total_bet_amount_user = sum(b.get('amount', 0) for b in results.get('bets', []) if isinstance(b, dict))
+        net_change_user = amount_to_pay - total_bet_amount_user
 
         result_lines.append(f"\n--- {user_mention_html} ---")
-        result_lines.extend(results['log'])
+        result_lines.extend(results.get('log', []))
 
+        # Update balance
         balance_update_status = ""
+        new_bal = None
         if amount_to_pay > 0:
             new_bal = update_balance(user_id, amount_to_pay)
             if new_bal is None:
                 balance_update_status = " ⚠️<b>Ошибка начисления!</b>"
-                logger.error(f"Roulette payout FAILED for user {user_id} in chat {chat_id}. Amount: {amount_to_pay}")
-                net_change = -total_bet_amount
+                logger.error(f"Roulette payout FAILED for user {user_id} in chat {chat_id}. Amount: {amount_to_pay:.2f}")
+                # Adjust net change if payout failed
+                net_change_user = -total_bet_amount_user
             else:
-                balance_update_status = f" -> Баланс: {new_bal:.2f}F"
-        elif total_bet_amount > 0:
+                 balance_update_status = f" -> Баланс: {new_bal:.2f}F"
+        else:
+            # If no payout, just show current balance
             current_bal = get_balance(user_id)
-            if current_bal is not None: balance_update_status = f" -> Баланс: {current_bal:.2f}F"
+            if current_bal is not None:
+                balance_update_status = f" -> Баланс: {current_bal:.2f}F"
+            else:
+                 balance_update_status = " (ошибка баланса)"
 
-        result_lines.append(f"<i>Итог: {net_change:+.2f} F{balance_update_status}</i>")
-        total_net_change += net_change
 
+        result_lines.append(f"<i>Итог: {net_change_user:+.2f} F{balance_update_status}</i>")
+        total_net_change += net_change_user # Accumulate total net change
+
+    # Check for users who bet but weren't processed (shouldn't happen)
     original_user_ids = list(active_bets_by_user.keys())
     for user_id in original_user_ids:
-         if user_id not in processed_users:
-             logger.warning(f"User {user_id} had bets but was not in results_by_user for chat {chat_id}")
-             result_lines.append(f"\n--- User_{user_id} (Ошибка обработки) ---")
+        if user_id not in processed_users:
+            logger.warning(f"User {user_id} had bets but was not in results_by_user for chat {chat_id}")
+            result_lines.append(f"\n--- User_{user_id} (Ошибка обработки) ---")
 
-    # --- Construct Final Message ---
+    # --- Final Message ---
     final_color_char = rl_get_color(winning_number_str)
     final_color_emoji = "🟢" if final_color_char == 'Green' else ("🔴" if final_color_char == 'Red' else "⚫")
-    timestamp = datetime.datetime.now().strftime("%H:%M") # Add timestamp to result
+    timestamp = datetime.datetime.now().strftime("%H:%M:%S") # Add seconds
     result_header = f"🎉 Выпало: <b>{final_color_emoji} {winning_number_str}</b> 🎉\n"
-    result_summary = f"\n\n<b>Общий итог раунда: {total_net_change:+.2f} F</b>    {timestamp}" # Added timestamp
+    result_summary = f"\n\n<b>Общий итог раунда: {total_net_change:+.2f} F</b>    [{timestamp}]"
     full_result_text = result_header + "\n".join(result_lines) + result_summary
 
-    # --- Reset Game State ---
-    # Important: access chat_data again in case it was modified elsewhere concurrently
-    current_chat_data = context.application.chat_data.get(chat_id, {})
-    current_game_state = current_chat_data.get(RL_GAME_KEY)
+    # Update game state to finished
+    current_game_state = context.application.chat_data.get(chat_id, {}).get(RL_GAME_KEY)
     if current_game_state:
-        current_game_state['state'] = 'finished' # Set state to finished/idle
+        current_game_state['state'] = 'finished'
         current_game_state['active_bets'] = {} # Clear bets
-        current_game_state['timer_job_name'] = None # Ensure cleared
-        current_game_state['timer_display_job_name'] = None # Ensure cleared
+        current_game_state['timer_job_name'] = None
+        current_game_state['timer_display_job_name'] = None
     else:
-        logger.warning(f"Game state for chat {chat_id} disappeared before state reset in spin logic.")
+        logger.warning(f"Game state for chat {chat_id} disappeared before final state reset in spin logic.")
 
-    # Get the final keyboard (should show "Start New Round")
-    final_chat_data = context.application.chat_data.get(chat_id, {}) # Get potentially updated chat_data
-    final_reply_markup = rl_get_main_menu_keyboard(final_chat_data, {}) # Generate keyboard based on final state
+    # Get final keyboard (should show "Start New Round")
+    # Need display names again for keyboard generation (empty map is fine here)
+    final_chat_data = context.application.chat_data.get(chat_id, {})
+    final_reply_markup = rl_get_main_menu_keyboard(final_chat_data, {})
 
-
-    # --- Send Final Result Message ---
     try:
         await bot.edit_message_text(
-            text=full_result_text,
-            chat_id=chat_id,
-            message_id=message_id,
-            parse_mode=ParseMode.HTML,
-            reply_markup=final_reply_markup
+            text=full_result_text, chat_id=chat_id, message_id=message_id,
+            parse_mode=ParseMode.HTML, reply_markup=final_reply_markup
         )
     except Forbidden:
-         logger.error(f"Forbidden: Cannot send final result to chat {chat_id}")
-         chat_data.pop(RL_GAME_KEY, None) # Clean up game state if blocked
+        logger.error(f"Forbidden: Cannot send final result to chat {chat_id}")
+        # Clean up game data if message failed due to permissions
+        context.application.chat_data.pop(chat_id, None)
     except Exception as e:
         logger.error(f"Failed to edit final roulette result for chat {chat_id}: {e}")
-        # Fallback: Try sending as a new message if edit failed
+        # If edit fails, try sending as a new message (less ideal)
         try:
             await bot.send_message(
-                chat_id=chat_id,
-                text=full_result_text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=final_reply_markup
+                chat_id=chat_id, text=full_result_text,
+                parse_mode=ParseMode.HTML, reply_markup=final_reply_markup
             )
         except Exception as send_e:
             logger.error(f"Failed to send final roulette result as new message for chat {chat_id}: {send_e}")
@@ -3002,14 +3410,15 @@ async def rl_spin_roulette_logic(context: ContextTypes.DEFAULT_TYPE, chat_id: in
 async def rl_spin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the manual 'Spin!' button press."""
     query = update.callback_query
+    if not query or not query.message or not query.from_user: return
     chat_id = query.message.chat_id
     user = query.from_user
     logger.info(f"Manual spin triggered by user {user.id} in chat {chat_id}")
 
-    chat_data = context.chat_data
+    chat_data = context.application.chat_data.get(chat_id, {})
     game_state = chat_data.get(RL_GAME_KEY)
 
-    # --- Validate Conditions for Manual Spin ---
+    # --- Validation ---
     if not game_state or game_state.get('state') != 'accepting_bets':
         await query.answer("Сейчас нельзя запустить вращение.", show_alert=True)
         return
@@ -3019,26 +3428,31 @@ async def rl_spin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Нет ставок для запуска вращения.", show_alert=True)
         return
 
-    # Check if only one player is betting (as per current keyboard logic)
-    if len(active_bets_by_user) != 1:
-        await query.answer("Кнопка 'Крутить!' доступна только если ставит один игрок.", show_alert=True)
-        return
+    # Optional: Check if the user pressing the button is allowed to spin
+    # (e.g., the initiator, or anyone if bets exist)
+    # initiator_id = game_state.get('initiator_id')
+    # if user.id != initiator_id:
+    #     await query.answer("Только инициатор раунда может запустить вращение досрочно.", show_alert=True)
+    #     return
 
-    # --- Initiate Spin ---
     await query.answer("Запускаем вращение...")
-    # Call the main spin logic function
+    # Call the main spin logic
     await rl_spin_roulette_logic(context, chat_id)
 
 
 async def rl_show_help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends the roulette rules explanation."""
     query = update.callback_query
+    if not query or not update.effective_chat: return
+
+    # Use f-string for constants, makes updates easier
     help_text = (
         f"<b>🎲 Правила Американской рулетки:</b>\n\n"
         f"• Делайте ставки с помощью кнопок.\n"
         f"• Макс. ставок в раунде: {RL_MAX_BETS_PER_ROUND} (всего), {RL_MAX_BETS_PER_USER} (на игрока).\n"
         f"• После первой ставки раунд запустится через {RL_BET_TIMER_SECONDS} сек (если не нажать 'Крутить!' раньше).\n"
-        f"• Можно нажать 'Крутить!' раньше (только если ставит 1 игрок).\n"
+        # f"• Можно нажать 'Крутить!' раньше (только если ставит 1 игрок).\n" # Removed constraint comment if spin is always allowed
+        f"• Можно нажать 'Крутить!' раньше, если есть ставки.\n"
         f"• Ставки на 0 или 00 выигрывают только при ставке на 'Число'.\n\n"
         f"<b>Типы ставок (Выплата 1 к X):</b>\n"
         f"- Число (Number): 1 к {RL_PAYOUTS['number']}\n"
@@ -3048,12 +3462,11 @@ async def rl_show_help_callback(update: Update, context: ContextTypes.DEFAULT_TY
         f"- Колонка (Column - col1/col2/col3): 1 к {RL_PAYOUTS['column']}\n\n"
         f"<i>Ставки на Цвет, Чет/Нечет, Дюжины, Колонки <b>проигрывают</b> при выпадении 0 или 00.</i>"
     )
-    await query.answer() # Acknowledge button press
-
+    await query.answer() # Answer the callback first
     try:
-        # Send rules as a new message in the chat
+        # Send help as a new message in the chat
         await context.bot.send_message(
-            chat_id=update.effective_chat.id, # Send in the chat where the button was pressed
+            chat_id=update.effective_chat.id,
             text=help_text,
             parse_mode=ParseMode.HTML
         )
@@ -3062,57 +3475,58 @@ async def rl_show_help_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Failed to send roulette help: {e}")
 
-
 async def rl_noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Callback for non-clickable buttons (like headers or display rows)."""
-    # Simply acknowledge the press without doing anything.
-    await update.callback_query.answer()
+    if update.callback_query:
+        await update.callback_query.answer() # Just acknowledge
 
 # --- End of Full Roulette Code ---
+
 
 # --- General Handlers ---
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """General handler for all Inline Keyboard Button presses."""
-    q = update.callback_query
-    data = q.data # The callback_data string
-    u = q.from_user
-    chat = update.effective_chat # Get chat object
-
-    if not data:
-        await q.answer() # Answer empty callbacks
+    query = update.callback_query
+    if not query or not query.data or not query.from_user or not update.effective_chat:
+        if query: await query.answer() # Answer even if data is missing
         return
 
-    logger.debug(f"Callback query received: '{data}' from user {u.id} in chat {chat.id} ({chat.type})")
-    parts = data.split("_") # Split data like "bj_bet_10" or "rl_start_bet"
+    data = query.data
+    user = query.from_user
+    chat = update.effective_chat
+    logger.debug(f"Callback query received: '{data}' from user {user.id} in chat {chat.id} ({chat.type})")
+
+    # Basic routing based on prefix
+    parts = data.split("_")
     prefix = parts[0] if parts else None
 
     try:
-        # --- Blackjack Callbacks ---
+        # --- Blackjack Callbacks (Private Chat Only) ---
         if prefix == "bj":
-            # Enforce private chat for Blackjack actions
             if chat.type != ChatType.PRIVATE:
-                await q.answer("Играть в Блекджек можно только в личном чате.", show_alert=True)
+                await query.answer("Играть в Блекджек можно только в личном чате.", show_alert=True)
                 return
 
             action = parts[1] if len(parts) > 1 else None
-            arg = parts[2] if len(parts) > 2 else None # e.g., bet amount or hand index
+            arg = parts[2] if len(parts) > 2 else None # Optional argument
 
             if action == "bet" and arg:
-                # Handle bet selection
-                await blackjack_handle_bet(update, context, int(arg))
+                try: bet_amount = int(arg)
+                except ValueError: await query.answer("Ошибка: неверная сумма ставки.", show_alert=True); return
+                await blackjack_handle_bet(update, context, bet_amount)
             elif action == "new" and arg == "game":
-                # Handle 'New Game' button (calls start command logic)
-                await blackjack_start_command(update, context)
+                 # blackjack_start_command now handles the logic for reusing session
+                 await blackjack_start_command(update, context)
             elif action in ["hit", "stand", "double", "split"] and arg is not None:
-                # Handle in-game actions
+                # Pass action and hand index (arg)
                 await blackjack_handle_action(update, context, [action, arg])
             else:
                 logger.warning(f"Unknown or incomplete BJ callback: {data}")
-                await q.answer() # Answer silently
+                await query.answer() # Acknowledge silently
 
         # --- Roulette Callbacks ---
         elif prefix == "rl":
-            # Route based on full callback data for Roulette
+            # Route based on full callback data string for clarity
             if data == "rl_start_bet": await rl_start_bet_callback(update, context)
             elif data.startswith("rl_type_"): await rl_choose_bet_type_callback(update, context)
             elif data.startswith("rl_value_"): await rl_choose_bet_value_callback(update, context)
@@ -3123,123 +3537,154 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             elif data == "rl_back_to_bet_value": await rl_back_to_bet_value_callback(update, context)
             elif data == "rl_spin": await rl_spin_callback(update, context)
             elif data == "rl_show_help": await rl_show_help_callback(update, context)
-            elif data == "rl_new_round": await rl_new_round_callback(update, context) # <<< ADDED
-            elif data == "rl_noop": await rl_noop_callback(update, context) # Handle non-clickable buttons
+            elif data == "rl_new_round": await rl_new_round_callback(update, context)
+            elif data == "rl_noop": await rl_noop_callback(update, context)
             else:
                 logger.warning(f"Unknown or incomplete RL callback: {data}")
-                await q.answer() # Answer silently
+                await query.answer() # Acknowledge silently
 
-        # --- Other Callbacks (if any) ---
         else:
             logger.warning(f"Unknown callback prefix: {prefix} in data: {data}")
-            await q.answer() # Answer silently
+            await query.answer() # Acknowledge silently
 
-    # --- Error Handling for Callbacks ---
     except ValueError as e:
-        logger.error(f"Callback ValueError (likely int conversion) for '{data}' user {u.id}: {e}", exc_info=True)
-        try: await q.answer("Ошибка: Неверный формат данных.", show_alert=True)
-        except Exception: pass
+        # Catch specific errors like int conversion failures
+        logger.error(f"Callback ValueError for '{data}' user {user.id}: {e}", exc_info=True)
+        try: await query.answer("Ошибка: Неверный формат данных.", show_alert=True)
+        except Exception: pass # Ignore error if answering fails
     except BadRequest as e:
         error_str = str(e).lower()
+        # Don't alert user for common, expected errors
         if "query is too old" in error_str:
-             logger.debug(f"Ignoring too old callback query for user {u.id}")
-             pass # User clicked an old button, nothing we can do
+            logger.debug(f"Ignoring too old callback query for user {user.id}")
+            # No answer needed
         elif "message is not modified" in error_str:
-            logger.debug(f"Callback resulted in 'Message is not modified' for user {u.id}")
-            pass # Edit resulted in no change, not really an error
+            logger.debug(f"Callback resulted in 'Message is not modified' for user {user.id}")
+            # Answer silently
+            try: await query.answer()
+            except Exception: pass
         elif "message to edit not found" in error_str:
-            logger.warning(f"Callback failed: 'Message to edit not found' for user {u.id}. Data: {data}")
-            try: await q.answer("Сообщение игры было удалено или изменено.", show_alert=False)
+            logger.warning(f"Callback failed: 'Message to edit not found' for user {user.id}. Data: {data}")
+            try: await query.answer("Сообщение игры было удалено или изменено.", show_alert=False) # Inform user gently
             except Exception: pass
         else:
-            logger.warning(f"Callback BadRequest for '{data}' user {u.id}: {e}")
-            try: await q.answer("Произошла ошибка при обработке.", show_alert=True)
+            # Other BadRequests might be more severe
+            logger.warning(f"Callback BadRequest for '{data}' user {user.id}: {e}")
+            try: await query.answer("Произошла ошибка при обработке.", show_alert=True)
             except Exception: pass
     except Forbidden as e:
-        logger.error(f"Callback Forbidden error for user {u.id} in chat {chat.id}: {e}")
-        try: await q.answer("Ошибка: Бот не имеет прав в этом чате.", show_alert=True)
+        logger.error(f"Callback Forbidden error for user {user.id} in chat {chat.id}: {e}")
+        try: await query.answer("Ошибка: Бот не имеет достаточных прав в этом чате.", show_alert=True)
         except Exception: pass
+    except Conflict as e:
+         logger.error(f"Conflict error during callback processing: {e}. Is another instance running?")
+         try: await query.answer("Ошибка сервера. Повторите попытку позже.", show_alert=True)
+         except Exception: pass
     except Exception as e:
-        logger.error(f"Callback general error for '{data}' user {u.id}: {e}", exc_info=True)
-        try: await q.answer("Произошла внутренняя ошибка.", show_alert=True)
+        # Catch any other unexpected errors
+        logger.error(f"Callback general error for '{data}' user {user.id}: {e}", exc_info=True)
+        try: await query.answer("Произошла внутренняя ошибка сервера.", show_alert=True)
         except Exception: pass
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Logs errors raised by Handlers."""
+    # Log the error and traceback
     logger.error(f"Exception while handling an update:", exc_info=context.error)
 
-    # Specific error handling (optional but helpful)
+    # --- Specific Error Handling ---
     if isinstance(context.error, Conflict):
-        # Usually means multiple bot instances running with the same token
-        logger.critical("Conflict error detected! Ensure only ONE instance of the bot is running.")
+        logger.critical("Conflict error detected! Ensure only ONE instance of the bot is running with this token.")
+        # Optionally, notify admin or shut down gracefully?
     elif isinstance(context.error, Forbidden):
-        # Bot blocked, kicked, or lacks permissions in a group
-        logger.error(f"Forbidden error: {context.error}. Bot might be blocked or lack permissions. Update: {update}")
+        logger.error(f"Forbidden error: {context.error}. Bot might be blocked, kicked, or lack permissions. Update: {update}")
+        # Clean up chat_data or user_data if related to a specific chat/user?
+        # Example: If error occurs during game in chat X, remove game state for chat X.
+        if update and isinstance(update, Update) and update.effective_chat:
+             chat_id = update.effective_chat.id
+             logger.warning(f"Removing potentially stale game data for chat {chat_id} due to Forbidden error.")
+             context.application.chat_data.pop(chat_id, None)
+             # Consider removing job queue tasks for this chat_id too
+
     elif isinstance(context.error, BadRequest):
-         # Log other BadRequests, but be mindful of common ones
-         error_str = str(context.error).lower()
-         if "message is not modified" not in error_str and "query is too old" not in error_str:
-              logger.warning(f"BadRequest error: {context.error}. Update: {update}")
+        error_str = str(context.error).lower()
+        # Ignore common, less critical BadRequest errors in main log
+        if "message is not modified" not in error_str and \
+           "query is too old" not in error_str and \
+           "message to delete not found" not in error_str and \
+           "message identifier is not specified" not in error_str and \
+           "message can't be edited" not in error_str and \
+           "message to edit not found" not in error_str:
+            logger.warning(f"BadRequest error: {context.error}. Update: {update}")
     # Add more specific error type handling if needed
+
+    # Note: Avoid sending messages to the user in the main error handler
+    # as the cause might be that the bot *cannot* send messages (e.g., Forbidden).
+
 
 # --- Main Bot Setup ---
 def main():
+    """Starts the bot."""
     logger.info("Starting bot application...")
-    start_keep_alive() # Start the Flask keep-alive server in a background thread
+    start_keep_alive() # Start the keep-alive web server thread
 
     try:
-        # --- Application Setup ---
+        # Build the application
         application = (
             Application.builder()
             .token(BOT_TOKEN)
-            .concurrent_updates(True)
-            .connect_timeout(30)
-            .read_timeout(30)
-            .pool_timeout(30)
+            .concurrent_updates(True) # Enable concurrent handling
+            .connect_timeout(30)      # Connection timeout
+            .read_timeout(30)         # Read timeout
+            .pool_timeout(30)         # Pool timeout (for get_updates long polling)
             .build()
         )
 
         # --- Register Handlers ---
-        # Core Commands
+        # Commands
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("balance", balance_command))
         application.add_handler(CommandHandler("bonus", bonus_command))
         application.add_handler(CommandHandler("leaderboard", leaderboard_command))
-
-        # Game Commands
         application.add_handler(CommandHandler("blackjack", blackjack_start_command))
         application.add_handler(CommandHandler("roulette", roulette_start_command))
 
-        # Callback Query Handler (for all buttons) - Group 0
+        # Callback Queries (Buttons) - Group 0
         application.add_handler(CallbackQueryHandler(button_callback_handler), group=0)
 
         # Message Handler for Roulette Number Input - Group 1
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, rl_handle_number_input), group=1)
+        # Handles non-command text messages, useful for the roulette number input
+        # Ensure it doesn't clash with other potential text inputs if added later.
+        application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE | filters.ChatType.GROUPS, rl_handle_number_input),
+            group=1
+        )
 
-
-        # Error Handler
+        # Error Handler (ensure it's added)
         application.add_error_handler(error_handler)
 
         logger.info("Handlers registered successfully.")
         print("Bot is running... Press Ctrl+C to stop.")
 
-        # --- Run the Bot ---
+        # Start polling
         application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True
-            )
+            allowed_updates=Update.ALL_TYPES, # Process all update types
+            drop_pending_updates=True # Ignore updates received while offline
+        )
 
     except ValueError as e:
+        # Catch potential config errors early
         logger.critical(f"Configuration Error: {e}")
-        print(f"CRITICAL ERROR: {e}")
+        print(f"CRITICAL CONFIGURATION ERROR: {e}")
     except Conflict as e:
-        logger.critical(f"Conflict Error: {e}. Is another instance of the bot running?")
-        print("CRITICAL ERROR: Conflict detected.")
+        # Catch conflict error (multiple instances)
+        logger.critical(f"Conflict Error: {e}. Is another instance running with the same token?")
+        print("CRITICAL ERROR: Conflict detected. Ensure only one instance is running.")
     except Exception as e:
-        logger.critical(f"An unexpected critical error occurred during startup: {e}", exc_info=True)
-        print(f"CRITICAL ERROR: {e}")
+        # Catch any other unexpected errors during startup
+        logger.critical(f"Unexpected critical error during bot startup: {e}", exc_info=True)
+        print(f"CRITICAL STARTUP ERROR: {e}")
     finally:
         print("Bot stopped.")
         logger.info("Bot application has stopped.")
