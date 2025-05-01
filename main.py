@@ -51,13 +51,13 @@ BJ_GAME_KEY = 'blackjack_game' # Key for user_data
 
 # --- Roulette Constants (Imported & Adapted) ---
 RL_BET_AMOUNTS = [10, 25, 50, 100, 250, 500]
-RL_MAX_BETS_PER_ROUND = 10
-RL_MAX_BETS_PER_USER = 3
+RL_MAX_BETS_PER_ROUND = 25
+RL_MAX_BETS_PER_USER = 5
 RL_BET_TIMER_SECONDS = 45
 RL_SPIN_ANIMATION_DURATION = 8.0
 RL_GAME_KEY = 'roulette_game'
 RL_USER_TEMP_BET_KEY = 'roulette_temp_bet'
-RL_TIMER_DISPLAY_UPDATE_INTERVAL = 2.0 # How often to update the timer text (seconds)
+RL_TIMER_DISPLAY_UPDATE_INTERVAL = 10.0 # How often to update the timer text (seconds)
 AMERICAN_WHEEL_ORDER = [
     '0', '28', '9', '26', '30', '11', '7', '20', '32', '17', '5', '22', '34',
     '15', '3', '24', '36', '13', '1', '00', '27', '10', '25', '29', '12', '8',
